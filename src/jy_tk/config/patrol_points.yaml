@@ -1,0 +1,42 @@
+multi_point_patrol:
+  ros__parameters:
+    # 点号列表
+    point_ids: ["1", "2"]
+
+    # 每三个数表示一个最终对接位姿：
+    # [x, y, yaw, x, y, yaw, ...]
+    #
+    # yaw 单位是弧度：
+    #   0       = 朝地图 X 正方向
+    #   1.5708  = 朝地图 Y 正方向
+    #   3.1416  = 朝地图 X 负方向
+    point_poses:
+      [
+        1.0, 1.0, 0.0,
+        3.0, 1.0, 0.0
+      ]
+
+    # Nav2 会先导航到最终点后方 0.7 米。
+    approach_distance: 0.7
+
+    # 简易直线对接。
+    dock_speed: 0.08
+    dock_distance: 0.7
+
+    # 下一任务开始前，先直线后退。
+    undock_speed: 0.10
+    undock_distance: 0.7
+
+    motion_timeout: 20.0
+    control_rate: 20.0
+
+    # 发给 velocity_smoother 输入，由它输出 /cmd_vel_smoothed。
+    cmd_vel_topic: /cmd_vel
+
+    task_topic: /patrol/task
+    arrived_topic: /patrol/arrived
+    state_topic: /patrol/state
+
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_footprint

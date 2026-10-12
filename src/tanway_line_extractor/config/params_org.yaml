@@ -1,0 +1,41 @@
+tanway_line_extractor:
+  ros__parameters:
+    cloud_topic:   "/tanwaylidar_pointcloud"
+    lines_topic:   "/tanway_lines"
+    markers_topic: "/tanway_line_markers"
+    frame_id:      "lidar_link"
+
+    # ===== 点云过滤 =====
+    min_range: 0.3
+    max_range: 30.0
+    min_intensity: 150
+    max_intensity: 1000
+    ring_min: 1
+    ring_max: 48
+
+    # ===== 算法参数 =====
+    bearing_std_dev:        0.001
+    range_std_dev:          0.02
+    least_sq_angle_thresh:  0.0001
+    least_sq_radius_thresh: 0.0001
+    max_line_gap:           0.05
+    min_line_length:        0.25
+    min_line_points:        8
+    min_split_dist:         0.04
+    outlier_dist:           0.06
+
+    # ===== 性能优化参数（新增）=====
+    # 处理频率上限（Hz）：雷达 10Hz 输入
+    #   10.0 = 每帧都处理
+    #    5.0 = 每两帧处理一帧（CPU 减半）
+    #    2.0 = 每五帧处理一帧（CPU 降到 1/5）
+    # 设 0 = 不限制
+    processing_rate: 10.0
+
+    # 每层点数上限（超过则等间隔下采样）
+    # 48 线雷达每层约 1000 点，1800 基本不触发，是保险值
+    max_points_per_ring: 1800
+
+    # 点云订阅队列深度
+    # 从默认 10 降到 3，减少点云缓冲内存
+    cloud_queue_size: 3

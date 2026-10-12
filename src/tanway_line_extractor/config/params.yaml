@@ -1,0 +1,65 @@
+tanway_line_extractor:
+  ros__parameters:
+    # ===== 话题与坐标系 =====
+    cloud_topic:   "/tanwaylidar_pointcloud"
+    lines_topic:   "/tanway_lines"
+    markers_topic: "/tanway_line_markers"
+    frame_id:      "lidar_link"
+
+    # ===== 提取模式 =====
+    extraction_mode: "3d_cluster"
+
+    # ===== 点云过滤 =====
+    min_range: 0.3
+    max_range: 30.0
+    min_intensity: 20
+    max_intensity: 255
+    ring_min: 0
+    ring_max: 47
+
+    # ===== 3D 聚类模式参数 =====
+    # ★ 关键修复：反光条反射率通常 180~220，用 180 严格过滤
+    reflective_threshold: 125.0
+
+    # 聚类距离：
+    #   反光条宽 0.05m，点上相邻间距 < 0.05m（近距离）
+    #   如果两条反光条十字交叉，用 0.05 让它们在交叉点断开
+    #   如果两条分开摆放，用 0.12
+    cluster_eps: 0.12
+
+    # 最少点数：反光条 0.3m 长，3m 处约 15 个点
+    cluster_min_pts: 5
+
+    # 线性度：0.3×0.05 反光条理论 ~36，实际可能 10~20
+    # 先放宽到 5，确认能出线后再收紧
+    linearity_threshold: 5.0
+
+    # 反光条长度限制
+    reflective_line_min_length: 0.30
+    reflective_line_max_length: 0.55
+
+    # 高度：先放宽，看实际数据在哪个 z 范围
+    reflective_z_min: -1.5
+    reflective_z_max:  1.5
+
+    # ===== 算法参数 =====
+    bearing_std_dev:        0.001
+    range_std_dev:          0.02
+    least_sq_angle_thresh:  0.0001
+    least_sq_radius_thresh: 0.0001
+    max_line_gap:           0.05
+    min_line_length:        0.25
+    min_line_points:        8
+    min_split_dist:         0.04
+    outlier_dist:           0.06
+
+    # ===== 性能参数 =====
+    processing_rate: 10.0
+    max_points_per_ring: 1800
+    cloud_queue_size: 3
+
+        # ===== 调试点云发布 =====
+    # 发布强度筛选后的高反光点云（PointCloud2）
+    # 在 RViz 里可以直接看哪些点通过了强度过滤
+    refl_cloud_topic: "/tanway_reflective_points"
+    publish_refl_cloud: true

@@ -1,0 +1,63 @@
+<launch>
+	<node pkg="tanwaylidar_view" name="TanwayLidar_MainNode" type="TanwayLidar_MainNode" output = "screen">
+		<param name="frame_id" type="string" value="TanwayTP" />
+		<param name="topic" type="string" value="/tanwaylidar_pointcloud" />
+		<param name="imu_topic" type="string" value="/tanwaylidar_imu" />
+		<param name="LidarType" type="int" value="13"/> 
+
+		<!--连接模式:仅支持"on-line"、"off-line"两种模式配置-->
+		<param name="ConnectType" type="string" value="on-line" />
+
+		<!--实时模式下配置-->
+		<!--本机IP地址-->
+		<param name="LocalHost" type="string" value="192.168.111.204" />
+		
+		<!--回放模式下配置-->
+		<!--PCAP文件绝对路径-->
+		<param name="PcapFilePath" type="string" value="/home/tanway/lidar_data/FocusB1.pcap" />
+		<param name="AlgoTablePath" type="string" value="$(find tanwaylidar_view)/sdk/config/algo_table.json" />
+		
+
+	
+		<!--雷达设备的IP地址-->
+		<param name="LidarHost" type="string" value="192.168.111.51" />
+		
+		<!--雷达发送点云数据的目的端口（即设备接收点云数据的端口）-->
+		<param name="LocalPointloudPort" type="int" value="5600" />
+		<!--雷达发送DIF数据的目的端口（即设备接收DIF数据的端口）-->
+		<param name="LocalDIFPort" type="int" value="5700" />
+
+		<!--ABC镜面水平、垂直角度偏移量-->
+		<param name="MirrorVerAngleOffsetA" type = "double" value = "0.0"/>
+		<param name="MirrorVerAngleOffsetB" type = "double" value = "0.0"/>
+		<param name="MirrorVerAngleOffsetC" type = "double" value = "0.0"/>
+		<param name="MirrorHorAngleOffsetA" type = "double" value = "0.0"/>
+		<param name="MirrorHorAngleOffsetB" type = "double" value = "0.0"/>
+		<param name="MirrorHorAngleOffsetC" type = "double" value = "0.0"/>
+
+
+		<!--是否开启拼接处理-->
+		<param name="bJointabc" type="bool" value="false" />
+		<!--分割节点1-->
+		<param name="jointabc_node1" type="double" value="1.0" />
+		<!--分割节点2-->
+		<param name="jointabc_node2" type="double" value="10.0" />
+		<!--单面区（近）A:0, B:1, C:2-->
+		<param name="jointabc_one_face" type="int" value="0" />
+		<!--双面区（远）A+B:1, A+C:2, B+C:3-->
+		<param name="jointabc_two_face" type="int" value="3" />
+
+
+
+		<!--帧时间戳以第一个点云first_point、最后一个点云last_point-->
+		<param name="FrameTimeStampType" type = "string" value = "last_point"/>
+		<!--点云时间戳以雷达时间true、系统时间false-->
+		<param name="UseLidarClock" type = "bool" value = "true"/>
+		<!--应用时间分帧模式true、扫描分帧模式false-->
+		<param name="UseTimeWindow" type = "bool" value = "false"/>
+
+
+	</node>
+
+	<node name="rviz" pkg="rviz" type="rviz" args="-d $(find tanwaylidar_view)/rviz/tanwayrun.rviz" />
+</launch>

@@ -1,0 +1,12 @@
+Header header
+uint32 device_code
+uint32 ps_version
+uint32 pl_version
+uint32 kernal_version
+uint32 protocol_version
+uint32 work_mode
+uint32 running_state
+uint32 time_sync_state
+uint64 error_code
+uint64 reserved1
+uint64 reserved2

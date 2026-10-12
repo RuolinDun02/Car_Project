@@ -1,0 +1,419 @@
+cmake_minimum_required(VERSION 3.5)
+project(tanwaylidar_view)
+
+add_definitions(-DDEBUG_STRING="")
+add_definitions(-DDEBUG_MODE="false")
+add_definitions(-DVERSION_NUMBER="2.0.6")
+
+if(NOT CMAKE_BUILD_TYPE)
+set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_CXX_FLAGS_RELEASE -Ofast)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -O3  -Wall -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3  -Wall")
+
+# Get the current CPU architecture
+set(CPU_ARCH ${CMAKE_SYSTEM_PROCESSOR})
+ 
+add_definitions(-DBOOST_ERROR_CODE_HEADER_ONLY)
+add_definitions(-DBOOST_SYSTEM_NO_DEPRECATED)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# CATKIN or COLCON
+set(COMPILE_METHOD COLCON)
+#set(COMPILE_METHOD CATKIN)
+#========================
+# Dependencies Setup
+#========================
+
+# Add option for PCL_ROS control
+option(DISABLE_PCL_ROS "Disable PCL ROS integration" OFF)
+# message(STATUS "DISABLE_PCL_ROS initial value: ${DISABLE_PCL_ROS}")  # 调试输出
+
+#ROS#
+find_package(roscpp 1.12 QUIET)
+
+if(roscpp_FOUND AND ${COMPILE_METHOD} STREQUAL "CATKIN")
+
+  message(=============================================================)
+  message("-- ROS Found. ROS Support is turned On.")
+  message(=============================================================)
+
+  # Handle DISABLE_PCL_ROS and USE_FOR_ROS mutual exclusion
+  if(DISABLE_PCL_ROS)
+    message(STATUS "PCL_ROS support is EXPLICITLY DISABLED")
+    add_definitions(-DDISABLE_PCL_ROS)
+  else()
+    add_definitions(-DUSE_FOR_ROS)
+    message(STATUS "PCL_ROS support is ENABLED (default)")
+  endif()
+  
+  set(SOURCE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/package_ros1.xml)
+  set(TARGET_FILE ${CMAKE_CURRENT_SOURCE_DIR}/package.xml)
+  configure_file(${SOURCE_FILE} ${TARGET_FILE} COPYONLY)
+  
+  ## Find catkin macros and libraries
+  ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
+  ## is used, also find other catkin packages
+  find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  rospy
+  std_msgs
+  message_generation
+  )
+  # Conditionally include pcl_ros
+  if(NOT DISABLE_PCL_ROS)
+    find_package(catkin REQUIRED COMPONENTS
+    pcl_ros
+    )
+  endif()
+
+## System dependencies are found with CMake's conventions
+# find_package(Boost REQUIRED COMPONENTS system)
+
+
+## Uncomment this if the package has a setup.py. This macro ensures
+## modules and global scripts declared therein get installed
+## See http://ros.org/doc/api/catkin/html/user_guide/setup_dot_py.html
+catkin_python_setup()
+
+################################################
+## Declare ROS messages, services and actions ##
+################################################
+
+## To declare and build messages, services or actions from within this
+## package, follow these steps:
+## * Let MSG_DEP_SET be the set of packages whose message types you use in
+##   your messages/services/actions (e.g. std_msgs, actionlib_msgs, ...).
+## * In the file package.xml:
+##   * add a build_depend tag for "message_generation"
+##   * add a build_depend and a exec_depend tag for each package in MSG_DEP_SET
+##   * If MSG_DEP_SET isn't empty the following dependency has been pulled in
+##     but can be declared for certainty nonetheless:
+##     * add a exec_depend tag for "message_runtime"
+## * In this file (CMakeLists.txt):
+##   * add "message_generation" and every package in MSG_DEP_SET to
+##     find_package(catkin REQUIRED COMPONENTS ...)
+##   * add "message_runtime" and every package in MSG_DEP_SET to
+##     catkin_package(CATKIN_DEPENDS ...)
+##   * uncomment the add_*_files sections below as needed
+##     and list every .msg/.srv/.action file to be processed
+##   * uncomment the generate_messages entry below
+##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
+
+## Generate messages in the 'msg' folder
+add_message_files(
+  FILES
+  DiagState.msg
+  DIFString.msg
+)
+
+## Generate services in the 'srv' folder
+# add_service_files(
+#   FILES
+#   Service1.srv
+#   Service2.srv
+# )
+
+## Generate actions in the 'action' folder
+# add_action_files(
+#   FILES
+#   Action1.action
+#   Action2.action
+# )
+
+## Generate added messages and services with any dependencies listed here
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
+
+################################################
+## Declare ROS dynamic reconfigure parameters ##
+################################################
+
+## To declare and build dynamic reconfigure parameters within this
+## package, follow these steps:
+## * In the file package.xml:
+##   * add a build_depend and a exec_depend tag for "dynamic_reconfigure"
+## * In this file (CMakeLists.txt):
+##   * add "dynamic_reconfigure" to
+##     find_package(catkin REQUIRED COMPONENTS ...)
+##   * uncomment the "generate_dynamic_reconfigure_options" section below
+##     and list every .cfg file to be processed
+
+## Generate dynamic reconfigure parameters in the 'cfg' folder
+#generate_dynamic_reconfigure_options(
+#   cfg/dynamic.cfg
+# )
+
+###################################
+## catkin specific configuration ##
+###################################
+## The catkin_package macro generates cmake config files for your package
+## Declare things to be passed to dependent projects
+## INCLUDE_DIRS: uncomment this if your package contains header files
+## LIBRARIES: libraries you create in this project that dependent projects also need
+## CATKIN_DEPENDS: catkin_packages dependent projects also need
+## DEPENDS: system dependencies of this project that dependent projects also need
+catkin_package(
+   INCLUDE_DIRS include
+#  LIBRARIES tanwaylidar_view
+   CATKIN_DEPENDS roscpp std_msgs
+#  DEPENDS system_lib
+)
+catkin_package(
+  DEPENDS ${DISABLE_PCL_ROS} ? "" : "pcl_ros"
+)
+###########
+## Build ##
+###########
+
+## Specify additional locations of header files
+## Your package locations should be listed before other locations
+include_directories(
+  include
+  sdk/include
+  sdk/about
+  sdk/utils
+  sdk/log
+  ${catkin_INCLUDE_DIRS}
+)
+
+## Declare a C++ library
+# add_library(${PROJECT_NAME}
+#   src/${PROJECT_NAME}/TensorProView.cpp
+# )
+## Declare a C++ library
+#add_library(TanwayLidarView
+#  src/LaunchConfig.cpp
+#  sdk/src/NetworkReader.cpp
+#  sdk/src/PcapReader.cpp
+#  sdk/src/PackageCache.cpp
+#  sdk/src/TWException.cpp 
+#)
+## Add cmake target dependencies of the library
+## as an example, code may need to be generated before libraries
+## either from message generation or dynamic reconfigure
+# add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+#add_dependencies(${PROJECT_NAME}
+#  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+#  ${catkin_EXPORTED_TARGETS}
+#)
+
+## Declare a C++ executable
+## With catkin_make all packages are built within a single CMake context
+## The recommended prefix ensures that target names across packages don't collide
+
+add_executable(TanwayLidar_MainNode src/TanwayLidar_MainNode.cpp src/LaunchConfig.cpp sdk/lidar/LidarDevice.cpp sdk/utils/PackageList.cpp sdk/about/about.cpp sdk/log/twlog.cpp)
+add_executable(TanwayLidar_DiagStateNode src/TanwayLidar_DiagStateNode.cpp)
+
+## Rename C++ executable without prefix
+## The above recommended prefix causes long target names, the following renames the
+## target back to the shorter version for ease of user use
+## e.g. "rosrun someones_pkg node" instead of "rosrun someones_pkg someones_pkg_node"
+# set_target_properties(${PROJECT_NAME}_node PROPERTIES OUTPUT_NAME node PREFIX "")
+
+## Add cmake target dependencies of the executable
+## same as for the library above
+# add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+## Specify libraries to link a library or executable target against
+
+if(CPU_ARCH STREQUAL "x86_64")
+  target_link_libraries(TanwayLidar_MainNode
+    ${catkin_LIBRARIES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/libalgo-x86_64.a
+  )
+elseif(CPU_ARCH MATCHES "aarch64")
+  target_link_libraries(TanwayLidar_MainNode
+    ${catkin_LIBRARIES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/libalgo-aarch64.a
+  )
+else()
+    message(STATUS "Unsupported architecture: ${CPU_ARCH}")
+endif()
+
+target_link_libraries(TanwayLidar_DiagStateNode
+ ${catkin_LIBRARIES}
+)
+
+#############
+## Install ##
+#############
+
+# all install targets should use catkin DESTINATION variables
+# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
+
+## Mark executable scripts (Python etc.) for installation
+## in contrast to setup.py, you can choose the destination
+# install(PROGRAMS
+#   scripts/my_python_script
+#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+# )
+
+## Mark executables and/or libraries for installation
+# install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_node
+#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+#   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+# )
+
+## Mark cpp header files for installation
+# install(DIRECTORY include/${PROJECT_NAME}/
+#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+#   FILES_MATCHING PATTERN "*.h"
+#   PATTERN ".svn" EXCLUDE
+# )
+
+## Mark other files for installation (e.g. launch and bag files, etc.)
+# install(FILES
+#   # myfile1
+#   # myfile2
+#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+# )
+install(PROGRAMS 
+  scripts/tensorpro_interfaces
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY
+  resource
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+#############
+## Testing ##
+#############
+
+
+## Add gtest based cpp test target and link libraries
+# catkin_add_gtest(${PROJECT_NAME}-test test/test_tensorpro_view.cpp)
+# if(TARGET ${PROJECT_NAME}-test)
+#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
+# endif()
+
+## Add folders to be run by python nosetests
+# catkin_add_nosetests(test)
+else(roscpp_FOUND AND ${COMPILE_METHOD} STREQUAL "CATKIN")
+
+message(=============================================================)
+message("-- ROS Not Found. ROS Support is turned Off.")
+message(=============================================================)
+
+endif(roscpp_FOUND AND ${COMPILE_METHOD} STREQUAL "CATKIN")
+
+#ROS2#
+find_package(rclcpp QUIET)
+if(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")
+
+  message(=============================================================)
+  message("-- ROS2 Found. ROS2 Support is turned On.")
+  message(=============================================================)
+  add_definitions(-DUSE_FOR_ROS2)
+  #add_definitions(-DPCL_USE_BOOST)
+
+  set(SOURCE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/package_ros2.xml)
+  set(TARGET_FILE ${CMAKE_CURRENT_SOURCE_DIR}/package.xml)
+  configure_file(${SOURCE_FILE} ${TARGET_FILE} COPYONLY)
+
+  find_package(ament_cmake REQUIRED)
+  find_package(rclcpp REQUIRED)
+  # find_package(rospy REQUIRED)
+  find_package(std_msgs REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  #find_package(rqt_gui REQUIRED)
+  #find_package(rqt_gui_py REQUIRED)
+  find_package(PCL REQUIRED)
+  include_directories(${PCL_INCLUDE_DIRS})
+  find_package(pcl_conversions REQUIRED)
+
+  ament_export_dependencies(
+    rclcpp
+    std_msgs
+    rqt_gui
+    rqt_gui_py
+    sensor_msgs
+  )
+
+  ament_export_include_directories(
+    include
+  )
+
+  #ament_package(
+  #)
+
+  include_directories(
+    include
+    sdk/include
+    sdk/about
+    sdk/utils
+    sdk/log
+    ${catkin_INCLUDE_DIRS}
+  )
+
+  add_executable(TanwayLidar_MainNode src/TanwayLidar_MainNode.cpp src/LaunchConfig.cpp sdk/lidar/LidarDevice.cpp sdk/utils/PackageList.cpp sdk/about/about.cpp sdk/log/twlog.cpp)
+
+  if(CPU_ARCH STREQUAL "x86_64")
+    target_link_libraries(TanwayLidar_MainNode
+    ${catkin_LIBRARIES}
+    ${PCL_LIBRARIES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/libalgo-x86_64.a
+  )
+  elseif(CPU_ARCH MATCHES "aarch64")
+    target_link_libraries(TanwayLidar_MainNode
+    ${catkin_LIBRARIES}
+    ${PCL_LIBRARIES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/libalgo-aarch64.a
+  )
+  else()
+    message(STATUS "Unsupported architecture: ${CPU_ARCH}")
+  endif()
+
+  ament_target_dependencies(
+    TanwayLidar_MainNode
+    rclcpp
+    std_msgs
+    sensor_msgs
+    pcl_conversions
+  )
+
+  # install(PROGRAMS 
+  #   scripts/tensorpro_interfaces
+  #   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  # )
+
+  # install(DIRECTORY
+  #   resource
+  #   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  # )
+
+
+  install(DIRECTORY rviz
+      DESTINATION share/${PROJECT_NAME}
+      FILES_MATCHING PATTERN "*.rviz"
+  )
+
+  install(DIRECTORY launch
+      DESTINATION share/${PROJECT_NAME}
+  ) 
+
+  install(DIRECTORY sdk/config
+      DESTINATION share/${PROJECT_NAME}
+      FILES_MATCHING PATTERN "*.json"
+  )
+
+  install(TARGETS
+    TanwayLidar_MainNode
+    DESTINATION lib/${PROJECT_NAME})
+
+  ament_package()
+else(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")
+  message(=============================================================)
+  message("-- ROS2 Not Found. ROS2 Support is turned Off.")
+  message(=============================================================)
+endif(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")

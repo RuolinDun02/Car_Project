@@ -1,0 +1,182 @@
+<?xml version="1.0"?>
+<!--
+================================================================================
+  自定义导航行为树（NavigateToPose）— Jazzy / BT.CPP 4.x 兼容版
+
+  基于 Nav2 官方默认文件修改：
+    /opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/
+    navigate_to_pose_w_replanning_and_recovery.xml
+
+  ★ 关键修复（Jazzy 必需）：
+    1. <root> 标签必须加 BTCPP_format="4"
+       原因：Jazzy 用 BT.CPP 4.x，XML 必须声明版本
+       否则警告 "The first tag of the XML (<root>) should contain
+              the attribute [BTCPP_format=4]"
+
+    2. 删除所有 error_code_id 参数
+       原因：BT.CPP 4.x 的 <Wait>/<Spin>/<BackUp> 节点没有
+             这个端口（providedPorts() 里不存在）
+       否则报错 "a port with name [error_code_id] is found in the XML
+              but not in the providedPorts()"
+
+  修改目的：
+    1. 去掉 Spin（原地旋转）和 BackUp（后退）恢复行为
+       原因：这两个行为会主动发 /cmd_vel，覆盖手动遥控指令，
+             导致"导航失败后必须关闭 behavior_server 才能遥控"
+    2. 减少重试次数（6 → 3），避免长时间占用控制权
+    3. 只保留 ClearCostmap + Wait，温和恢复
+
+  恢复行为对比：
+    原版：清代价地图 → Spin 90° → Wait 5s → BackUp 0.3m（循环）
+    本版：清代价地图 → Wait 3s（循环，最多 3 次）
+
+  执行流程：
+    NavigateRecovery（最多重试 3 次）
+      ├─ 正常导航
+      │   ├─ ComputePathToPose（1Hz 重新规划）
+      │   └─ FollowPath（跟踪路径）
+      │
+      └─ 失败时执行 RecoveryFallback
+          └─ RoundRobin（轮流执行）
+              ├─ 1. 清除代价地图（先 local，后 global）
+              └─ 2. Wait 等待 3 秒
+================================================================================
+-->
+<root main_tree_to_execute="MainTree" BTCPP_format="4">
+
+  <BehaviorTree ID="MainTree">
+
+    <!--
+      RecoveryNode：带恢复逻辑的包装节点
+        number_of_retries="3"：整个子树最多重试 3 次
+        原版是 6 次，这里减少到 3 次
+    -->
+    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
+
+      <!--
+        PipelineSequence：顺序执行子节点
+          - ComputePathToPose：先规划路径
+          - FollowPath：再跟踪路径
+        两者都成功才算导航成功
+      -->
+      <PipelineSequence name="NavigateWithReplanning">
+
+        <!--
+          RateController：限流节点，控制 ComputePathToPose 频率
+            hz="1.0"：每秒最多执行 1 次规划
+            防止高频规划占满 CPU
+        -->
+        <RateController hz="1.0">
+
+          <!--
+            RecoveryNode：规划失败时的恢复
+              number_of_retries="1"：最多重试 1 次
+          -->
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+
+            <!-- 核心：调用全局规划器计算路径 -->
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+
+            <!-- 规划失败时：清除全局代价地图（可能是残留障碍导致规划失败）-->
+            <ClearEntireCostmap
+              name="ClearGlobalCostmap-Context"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+
+        <!--
+          RecoveryNode：路径跟踪失败时的恢复
+            number_of_retries="1"：最多重试 1 次
+        -->
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+
+          <!-- 核心：调用局部控制器跟踪路径 -->
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+
+          <!-- 跟踪失败时：清除局部代价地图 -->
+          <ClearEntireCostmap
+            name="ClearLocalCostmap-Context"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <!--
+        ReactiveFallback：反应式回退
+          按顺序尝试子节点，任意一个成功就停止
+          常用于"目标更新"和"恢复行为"的优先级判断
+      -->
+      <ReactiveFallback name="RecoveryFallback">
+
+        <!-- 如果目标被更新，立即退出恢复，重新开始导航 -->
+        <GoalUpdated/>
+
+        <!--
+          RoundRobin：轮流执行恢复动作
+            每次失败按顺序取下一个动作
+            循环使用，直到 RecoveryNode 重试用完
+        -->
+        <RoundRobin name="RecoveryActions">
+
+          <!--
+            ★ 恢复动作 1：清除代价地图
+              每次失败都执行，无害且有时能解决问题
+          -->
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap
+              name="ClearLocalCostmap-Subtree"
+              service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap
+              name="ClearGlobalCostmap-Subtree"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+
+          <!--
+            ★ 恢复动作 2：Wait 等待
+              wait_duration="3"：等 3 秒
+              原版是 5 秒，这里减少到 3 秒
+              作用：给底盘一点时间恢复（如电机过流保护自恢复）
+
+            ★ 关键修复：去掉了 error_code_id="{wait_error_code}"
+              原因：BT.CPP 4.x 的 Wait 节点没有这个端口
+                    否则报错 "port [error_code_id] not in providedPorts()"
+          -->
+          <Wait wait_duration="3"/>
+
+          <!--
+            ================================================================
+            以下为原版 Nav2 默认的恢复行为，已注释掉
+            原因：Spin 和 BackUp 会主动发 /cmd_vel，覆盖手动遥控指令
+
+            如果以后需要恢复这两个行为，取消注释即可。
+
+            注意事项：
+              - Spin 会原地旋转，可能撞到周围障碍
+              - BackUp 是盲退，不看后面有没有障碍
+              - 两者都会与手动遥控冲突
+              - BT.CPP 4.x 里同样不能用 error_code_id 参数
+            ================================================================
+          -->
+
+          <!--
+          <Spin spin_dist="1.57"/>
+          -->
+          <!--
+            原版：Spin 原地旋转 90°（1.57 rad）
+              用途：尝试换个角度重新规划
+              问题：占用电机的旋转指令，覆盖遥控
+          -->
+
+          <!--
+          <BackUp backup_dist="0.30" backup_speed="0.15"/>
+          -->
+          <!--
+            原版：BackUp 后退 0.3 米，速度 0.15 m/s
+              用途：离开卡住的位置
+              问题：盲退，可能与遥控冲突或撞到后方障碍
+          -->
+
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

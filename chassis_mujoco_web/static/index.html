@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FW-mid Gazebo Twin</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark">FW-mid</span>
+        <span class="sub">Gazebo URDF digital twin</span>
+      </div>
+      <div class="top-right">
+        <div class="batt" id="battWidget" title="底盘电量">
+          <span class="batt-pct" id="battPct">—%</span>
+          <span class="batt-shell" aria-hidden="true">
+            <span class="batt-level" id="battLevel"></span>
+            <span class="batt-bolt" id="battBolt" hidden></span>
+          </span>
+          <span class="batt-nub" aria-hidden="true"></span>
+        </div>
+        <div class="live motor-live" id="motorBadge">使能：读取中…</div>
+        <div class="live" id="liveBadge">连接中…</div>
+      </div>
+    </header>
+
+    <main>
+      <canvas id="view"></canvas>
+
+      <aside class="panel ctrl" id="ctrlPanel">
+        <section>
+          <h2>四轮协同</h2>
+          <div class="row gap">
+            <button type="button" class="btn" id="btnEnable">使能电机</button>
+            <button type="button" class="btn" id="btnUnlock">解锁</button>
+            <button type="button" class="btn" id="btnStraighten">回直四轮</button>
+            <button type="button" class="btn danger" id="btnStop">停止</button>
+          </div>
+          <p class="motor-banner" id="motorBanner">电机使能：读取中…</p>
+          <div class="row gap estop-row">
+            <button type="button" class="btn estop" id="btnEstop">急停</button>
+            <button type="button" class="btn" id="btnEstopClear">解除急停</button>
+          </div>
+          <label class="field">速度 m/s
+            <input type="range" id="speedRange" min="0.05" max="0.6" step="0.05" value="0.1" />
+            <span class="val" id="speedVal">0.10</span>
+          </label>
+          <label class="field">转向 °/s
+            <input type="range" id="turnRange" min="5" max="45" step="1" value="25" />
+            <span class="val" id="turnVal">25</span>
+          </label>
+          <div class="pad">
+            <button type="button" class="btn pad-btn" data-action="left" id="btnLeft">前进左转</button>
+            <button type="button" class="btn pad-btn" data-action="forward" id="btnFwd">前进</button>
+            <button type="button" class="btn pad-btn" data-action="right" id="btnRight">前进右转</button>
+            <button type="button" class="btn pad-btn" data-action="strafe_left" id="btnStrafeLeft">左平移</button>
+            <button type="button" class="btn pad-btn danger" data-action="stop" id="btnStop2">停</button>
+            <button type="button" class="btn pad-btn" data-action="strafe_right" id="btnStrafeRight">右平移</button>
+            <button type="button" class="btn pad-btn" data-action="back_left" id="btnBackLeft">后退左转</button>
+            <button type="button" class="btn pad-btn" data-action="backward" id="btnBack">后退</button>
+            <button type="button" class="btn pad-btn" data-action="back_right" id="btnBackRight">后退右转</button>
+          </div>
+          <p class="hint">平移走横移档；其余协同默认 4T4D。无指令保持四轮 0°。松手/停减速回直。急停=零速+失能。</p>
+          <p class="hint" id="cmdStatus">指令：空闲</p>
+        </section>
+
+        <section class="debug">
+          <h2>单轮调试</h2>
+          <p class="hint">仅调试用，不走整车协同；与上方前进/转向互斥。</p>
+          <div class="wheel-sel">
+            <button type="button" class="btn chip active" data-wheel="lf">LF</button>
+            <button type="button" class="btn chip" data-wheel="rf">RF</button>
+            <button type="button" class="btn chip" data-wheel="lr">LR</button>
+            <button type="button" class="btn chip" data-wheel="rr">RR</button>
+          </div>
+          <label class="field">该轮速度 m/s
+            <input type="range" id="wVelRange" min="-0.6" max="0.6" step="0.05" value="0" />
+            <span class="val" id="wVelVal">0.00</span>
+          </label>
+          <label class="field">该轮转角 °
+            <input type="range" id="wAngRange" min="-45" max="45" step="1" value="0" />
+            <span class="val" id="wAngVal">0</span>
+          </label>
+          <div class="row gap">
+            <button type="button" class="btn" id="btnWheelHold">按住点动</button>
+            <button type="button" class="btn danger" id="btnWheelZero">停止调试</button>
+          </div>
+        </section>
+      </aside>
+
+      <aside class="hud" id="hud">
+        <section class="motor-top">
+          <h2>电机使能 <span id="motorAllTag" class="tag">读取中…</span></h2>
+          <p class="hint" id="motorAllHint" style="margin-top:0.25rem">等待 CAN 反馈…</p>
+          <div class="wheel-en-grid" id="wheelEnGrid">
+            <div class="wheel-en" data-wheel="lf">
+              <div class="wheel-en-name">LF 左前</div>
+              <div class="wheel-en-bits">
+                <span class="bit" id="en_drive_lf">驱动 —</span>
+                <span class="bit" id="en_steer_lf">转向 —</span>
+              </div>
+            </div>
+            <div class="wheel-en" data-wheel="rf">
+              <div class="wheel-en-name">RF 右前</div>
+              <div class="wheel-en-bits">
+                <span class="bit" id="en_drive_rf">驱动 —</span>
+                <span class="bit" id="en_steer_rf">转向 —</span>
+              </div>
+            </div>
+            <div class="wheel-en" data-wheel="lr">
+              <div class="wheel-en-name">LR 左后</div>
+              <div class="wheel-en-bits">
+                <span class="bit" id="en_drive_lr">驱动 —</span>
+                <span class="bit" id="en_steer_lr">转向 —</span>
+              </div>
+            </div>
+            <div class="wheel-en" data-wheel="rr">
+              <div class="wheel-en-name">RR 右后</div>
+              <div class="wheel-en-bits">
+                <span class="bit" id="en_drive_rr">驱动 —</span>
+                <span class="bit" id="en_steer_rr">转向 —</span>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section>
+          <h2>整车状态</h2>
+          <dl>
+            <div><dt>档位</dt><dd id="gear">—</dd></div>
+            <div><dt>急停</dt><dd id="estop">—</dd></div>
+            <div><dt>故障</dt><dd id="error">—</dd></div>
+            <div><dt>遥控</dt><dd id="joypad">—</dd></div>
+            <div><dt>充电</dt><dd id="charge">—</dd></div>
+            <div><dt>解锁</dt><dd id="unlock">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>运动</h2>
+          <dl>
+            <div><dt>vx</dt><dd id="vx">—</dd></div>
+            <div><dt>vy</dt><dd id="vy">—</dd></div>
+            <div><dt>ωz</dt><dd id="wz">—</dd></div>
+            <div><dt>虚拟轮速</dt><dd id="vsteer">—</dd></div>
+            <div><dt>虚拟轮角</dt><dd id="asteer">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>位姿</h2>
+          <dl>
+            <div><dt>x</dt><dd id="px">—</dd></div>
+            <div><dt>y</dt><dd id="py">—</dd></div>
+            <div><dt>yaw</dt><dd id="pyaw">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>转向角 ° <span id="angleLive" class="tag">—</span></h2>
+          <dl>
+            <div><dt>LF</dt><dd id="steer_lf">—</dd></div>
+            <div><dt>RF</dt><dd id="steer_rf">—</dd></div>
+            <div><dt>LR</dt><dd id="steer_lr">—</dd></div>
+            <div><dt>RR</dt><dd id="steer_rr">—</dd></div>
+          </dl>
+          <p class="hint" id="steerNote"></p>
+        </section>
+        <section>
+          <h2>轮速 m/s</h2>
+          <dl>
+            <div><dt>LF</dt><dd id="wvel_lf">—</dd></div>
+            <div><dt>RF</dt><dd id="wvel_rf">—</dd></div>
+            <div><dt>LR</dt><dd id="wvel_lr">—</dd></div>
+            <div><dt>RR</dt><dd id="wvel_rr">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>驱动电流 A</h2>
+          <dl>
+            <div><dt>LF</dt><dd id="icur_lf">—</dd></div>
+            <div><dt>RF</dt><dd id="icur_rf">—</dd></div>
+            <div><dt>LR</dt><dd id="icur_lr">—</dd></div>
+            <div><dt>RR</dt><dd id="icur_rr">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>电池 / IO</h2>
+          <dl>
+            <div><dt>SOC</dt><dd id="soc">—</dd></div>
+            <div><dt>电压</dt><dd id="volt">—</dd></div>
+            <div><dt>电流</dt><dd id="curr">—</dd></div>
+            <div><dt>剩余</dt><dd id="ah">—</dd></div>
+            <div><dt>碰撞</dt><dd id="impact">—</dd></div>
+            <div><dt>跌落</dt><dd id="drop">—</dd></div>
+            <div><dt>近光/刹车灯</dt><dd id="lamps">—</dd></div>
+          </dl>
+        </section>
+        <p class="hint">官方 Gazebo URDF · 拖拽旋转 · 滚轮缩放</p>
+        <p class="hint" id="bootErr" hidden></p>
+      </aside>
+    </main>
+  </div>
+  <script type="module" src="/app.js?v=ctrl15"></script>
+</body>
+</html>

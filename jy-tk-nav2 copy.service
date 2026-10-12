@@ -1,0 +1,18 @@
+[Unit]
+Description=JY-TK Nav2 bringup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=jiayi
+WorkingDirectory=/home/jiayi/Car_Project
+ExecStart=/home/jiayi/Car_Project/start_nav2.sh
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+Environment=RCUTILS_COLORIZED_OUTPUT=0
+
+[Install]
+WantedBy=multi-user.target

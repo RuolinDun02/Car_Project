@@ -1,0 +1,25 @@
+{
+    "lidar_mode": "on-line",
+    "lidar_type": "LT_Duetto",
+    "on-line_config": {
+        "lidar_ip": "192.168.111.51",
+        "host_ip": "192.168.111.204",
+        "data_port": 5600,
+        "dif_port": 5700,
+        "imu_port": 5700,
+        "lidar_id": 0
+    },
+    "off-line_config": {
+        "pcap_file_path": "test.pcap",
+        "lidar_ip": "192.168.111.51",
+        "data_port": 5600,
+        "dif_port": 5700,
+        "imu_port": 5700,
+        "lidar_id": 0,
+        "need_replay": true
+    },
+    "algo_config": {
+        "enabled": true,
+        "algo_table_path": "../config/algo_table.json"
+    }
+}

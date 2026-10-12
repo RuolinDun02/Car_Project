@@ -1,0 +1,76 @@
+slam_toolbox:
+  ros__parameters:
+
+    # ==== 核心：纯激光建图模式 ====
+    use_odometry: true              # 【保持】不依赖外部里程计
+    
+    # ==== 坐标系 ====
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    mode: mapping                    # mapping 或 localization
+    
+    # ==== 求解器 ====
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ==== 基本参数 ====
+    debug_logging: false
+    throttle_scans: 1
+    transform_publish_period: 0.02
+    map_update_interval: 2.0         # 地图可视化更新频率(秒)，不影响后台计算
+    resolution: 0.05                 # 地图分辨率(米)
+    max_laser_range: 30.0            # 最大激光距离
+    tf_buffer_duration: 30.0         # TF缓存时长
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+
+    # ↓↓↓ 【核心修改区】无里程计时的关键参数 ↓↓↓
+    minimum_time_interval: 0.5       # 【改大】原0.2。纯激光匹配极耗CPU，0.5s(2Hz)可防止队列积压卡顿
+    transform_timeout: 1.0           # 【改大】原0.2。给TF查找和纯激光匹配留足时间，防止超时丢帧
+    
+    # ==== 扫描匹配（核心）====
+    use_scan_matching: true
+    use_scan_barycenter: true
+    
+    # ↓↓↓ 【致命问题修复区】 ↓↓↓
+    # 因为你的 odom->base_footprint 是静态TF(永远为0)，如果这里大于0，slam_toolbox会认为车没动，从而丢弃所有帧！
+    minimum_travel_distance: 0.0     # 【必改】原0.1。改为0.0强制处理每一帧(或极小值0.01)
+    minimum_travel_heading: 0.0      # 【必改】原0.1。同上
+    
+    scan_buffer_size: 10             # 【改小】原10。无里程计时减小缓冲区，防止内存和计算爆炸
+    scan_buffer_maximum_scan_distance: 30.0
+    link_match_minimum_response_fine: 0.05   # 【降低】原0.1。放宽匹配阈值，提高无odom时的匹配成功率
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.3  # 【降低】原0.35。更容易触发闭环修正
+    loop_match_minimum_response_fine: 0.4    # 【降低】原0.45
+
+    # ==== 相关性搜索（无odom时必须放大搜索空间）====
+    # 因为没有odom提供准确的初始位置猜测，纯靠激光匹配需要更大的搜索范围
+    correlation_search_space_dimension: 1.0      # 【放大】原0.5。搜索范围扩大到1米
+    correlation_search_space_resolution: 0.05    # 【放大】原0.01。降低搜索精度以换取速度
+    correlation_search_space_smear_deviation: 0.1
+
+    # ==== 闭环搜索 ====
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # ==== 扫描匹配器惩罚与偏移 ====
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349            # 【保持】约20度，无odom时角度搜索范围要够大
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
