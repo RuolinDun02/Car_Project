@@ -12,28 +12,34 @@ multi_point_patrol:
     #   3.1416  = 朝地图 X 负方向
     point_poses:
       [
-        1.0, 1.0, 0.0,
-        3.0, 1.0, 0.0
+        3.45, 0.75, 1.5708,  # 点 1
+        -1.8, -12.0, -1.5708,  # 点 2
       ]
 
     # Nav2 会先导航到最终点后方 0.7 米。
     approach_distance: 0.7
 
+    # 与记录停靠点的地图距离不超过该值，才认为仍停靠在该点。
+    docked_position_tolerance: 0.5
+
     # 简易直线对接。
     dock_speed: 0.08
     dock_distance: 0.7
 
-    # 下一任务开始前，先直线后退。
+    # Nav2 到达预停靠点后，持续发布零速度等待舵轮回正。
+    steering_settle_time: 1.5
+
+    # 前往下一点前，先直线后退。
     undock_speed: 0.10
     undock_distance: 0.7
 
-    motion_timeout: 20.0
+    motion_timeout: 120.0
     control_rate: 20.0
 
     # 发给 velocity_smoother 输入，由它输出 /cmd_vel_smoothed。
-    cmd_vel_topic: /cmd_vel
+    cmd_vel_topic: /cmd_vel_smoothed
 
-    task_topic: /patrol/task
+    next_topic: /patrol/next
     arrived_topic: /patrol/arrived
     state_topic: /patrol/state
 

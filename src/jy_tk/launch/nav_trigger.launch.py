@@ -8,9 +8,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     args = [
         # ---------- 目标点 ----------
-        DeclareLaunchArgument('goal_x',             default_value='3.45'),
-        DeclareLaunchArgument('goal_y',             default_value='0.75'),
-        DeclareLaunchArgument('goal_yaw',           default_value='1.571'),
+        DeclareLaunchArgument('goal_x',             default_value='-1.8'),
+        DeclareLaunchArgument('goal_y',             default_value='-12'),
+        DeclareLaunchArgument('goal_yaw',           default_value='0.0'),
 
         # ---------- BACKUP ----------
         DeclareLaunchArgument('backup_dist',        default_value='1.0'),

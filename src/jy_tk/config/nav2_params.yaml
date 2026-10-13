@@ -68,7 +68,7 @@ amcl:
     # 机器人移动超过这两个阈值时才更新粒子
     # 太小→抖动；太大→定位滞后
     update_min_d: 0.15                # 平移触发阈值（m）
-    update_min_a: 0.1                 # 旋转触发阈值（rad）
+    update_min_a: 0.05                 # 旋转触发阈值（rad）
 
     # ---- 恢复行为（处理机器人被抱起或卡住）----
     # 0.0 表示禁用基于随机粒子的自动恢复
@@ -140,9 +140,13 @@ controller_server:
     # ---- 进度检查 ----
     # 如果机器人在规定时间内没走够距离，认为卡住
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5   # 必须移动的最小距离（m）
-      movement_time_allowance: 10.0   # 时间窗口（s）
+      # plugin: "nav2_controller::SimpleProgressChecker"
+      # required_movement_radius: 0.2   # 必须移动的最小距离（m）
+      # movement_time_allowance: 30.0   # 时间窗口（s）
+      plugin: "nav2_controller::PoseProgressChecker"
+      required_movement_radius: 0.1
+      required_movement_angle: 0.1
+      movement_time_allowance: 29.0
 
     # ---- 目标检查 ----
     # 位置和朝向都在容差内才算到达
@@ -157,21 +161,21 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 速度
-      desired_linear_vel: 0.15         # 目标线速度（m/s），保守起步
+      desired_linear_vel: 0.2         # 目标线速度（m/s），保守起步
       min_approach_linear_velocity: 0.05   # 接近目标时的最低速度
 
       # 前视距离
       lookahead_dist: 0.75             # 默认前视距离（m）
-      min_lookahead_dist: 0.3         # 最小前视距离
+      min_lookahead_dist: 0.4         # 最小前视距离
       max_lookahead_dist: 0.9         # 最大前视距离
       lookahead_time: 1.5             # 速度自适应时的时域
       use_velocity_scaled_lookahead_dist: false
 
       # 旋转
-      rotate_to_heading_angular_vel: 0.27   # 原地旋转角速度（rad/s）
+      rotate_to_heading_angular_vel: 0.2   # 原地旋转角速度（rad/s）
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.5   # 大于 28° 才原地旋转
-      max_angular_accel: 0.85               # 最大角加速度（rad/s²）
+      max_angular_accel: 1.0               # 最大角加速度（rad/s²）
 
       # 避障
       use_collision_detection: true
@@ -200,7 +204,7 @@ local_costmap:
 
       # ---- 运行频率 ----
       update_frequency: 5.0           # 代价地图更新频率（Hz）
-      publish_frequency: 2.0          # 发布频率（Hz）
+      publish_frequency: 5.0          # 发布频率（Hz）
 
       # ---- 坐标系 ----
       global_frame: odom              # 局部地图用 odom，避免 map 跳变影响

@@ -6,13 +6,14 @@
 流程：
   IDLE
     → NAVIGATING       Nav2 导航到目标点前方
+    → SETTLING         持续发布零速度，等待舵轮回正
     → DOCKING          直线低速前进，模拟精对接
-    → DOCKED           发布到达消息，等待下一任务
-    → UNDOCKING        收到下一任务后，先直线后退
+    → DOCKED           发布到达消息，等待下一点
+    → UNDOCKING        收到下一点后，先直线后退
     → NAVIGATING       前往下一个点
 
-任务输入：
-  /patrol/task         std_msgs/msg/String
+下一点输入：
+  /patrol/next         std_msgs/msg/String
   data 为点号，例如 "1"、"2"
 
 对外输出：
@@ -21,6 +22,21 @@
 
 状态输出：
   /patrol/state        std_msgs/msg/String
+
+常用命令：
+  1. 启动巡检，前往点位 1：
+     curl -X POST http://127.0.0.1:8189/api/trigger_nav \
+       -H 'Content-Type: application/json' \
+       -d '{}'
+
+  2. 点位 1 机械臂任务完成，继续前往点位 2：
+     curl -X POST http://127.0.0.1:8189/api/arm_done \
+       -H 'Content-Type: application/json' \
+       -d '{"arm":"BOTH","result":"ok","point_id":"1"}'
+
+  3. 跳过机械臂桥接，直接发布点位 2：
+     ros2 topic pub --once /patrol/next std_msgs/msg/String \
+       "{data: '2'}"
 
 说明：
   当前对接和退出均使用 odom 位移判断。
@@ -52,6 +68,7 @@ from tf2_ros import TransformException
 class PatrolState(Enum):
     IDLE = "IDLE"
     NAVIGATING = "NAVIGATING"
+    SETTLING = "SETTLING"
     DOCKING = "DOCKING"
     DOCKED = "DOCKED"
     UNDOCKING = "UNDOCKING"
@@ -81,9 +98,13 @@ class MultiPointPatrol(Node):
         # 最终点与预停靠点之间的距离。
         self.declare_parameter("approach_distance", 0.7)
 
+        # 收到新目标时，用地图坐标核验记录的停靠点是否仍然有效。
+        self.declare_parameter("docked_position_tolerance", 0.5)
+
         # 直线对接参数。
         self.declare_parameter("dock_speed", 0.08)
         self.declare_parameter("dock_distance", 0.7)
+        self.declare_parameter("steering_settle_time", 1.5)
 
         # 离开当前停靠点的直线后退参数。
         self.declare_parameter("undock_speed", 0.10)
@@ -94,9 +115,9 @@ class MultiPointPatrol(Node):
 
         # 直线运动发到 velocity_smoother 的输入。
         # velocity_smoother 再输出 /cmd_vel_smoothed 给底盘桥接节点。
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_smoothed")
 
-        self.declare_parameter("task_topic", "/patrol/task")
+        self.declare_parameter("next_topic", "/patrol/next")
         self.declare_parameter("arrived_topic", "/patrol/arrived")
         self.declare_parameter("state_topic", "/patrol/state")
 
@@ -110,11 +131,17 @@ class MultiPointPatrol(Node):
         self.approach_distance = float(
             self.get_parameter("approach_distance").value
         )
+        self.docked_position_tolerance = max(0.0, float(
+            self.get_parameter("docked_position_tolerance").value
+        ))
         self.dock_speed = abs(float(
             self.get_parameter("dock_speed").value
         ))
         self.dock_distance = abs(float(
             self.get_parameter("dock_distance").value
+        ))
+        self.steering_settle_time = max(0.0, float(
+            self.get_parameter("steering_settle_time").value
         ))
         self.undock_speed = abs(float(
             self.get_parameter("undock_speed").value
@@ -132,8 +159,8 @@ class MultiPointPatrol(Node):
         self.cmd_vel_topic = str(
             self.get_parameter("cmd_vel_topic").value
         )
-        self.task_topic = str(
-            self.get_parameter("task_topic").value
+        self.next_topic = str(
+            self.get_parameter("next_topic").value
         )
         self.arrived_topic = str(
             self.get_parameter("arrived_topic").value
@@ -187,6 +214,9 @@ class MultiPointPatrol(Node):
         self.motion_origin = None
         self.motion_started_at = None
 
+        # Nav2 到达后的舵轮回正等待起始时间。
+        self.settle_started_at = None
+
         # 当前 NavigateToPose goal handle。
         self.nav_goal_handle = None
 
@@ -234,10 +264,10 @@ class MultiPointPatrol(Node):
             state_qos,
         )
 
-        self.task_sub = self.create_subscription(
+        self.next_sub = self.create_subscription(
             String,
-            self.task_topic,
-            self.on_task,
+            self.next_topic,
+            self.on_next,
             10,
         )
 
@@ -253,16 +283,16 @@ class MultiPointPatrol(Node):
             f"可用巡检点: {list(self.points.keys())}"
         )
         self.get_logger().info(
-            f"任务话题: {self.task_topic}"
+            f"下一点话题: {self.next_topic}"
         )
         self.get_logger().info(
             f"到达话题: {self.arrived_topic}"
         )
 
     # ================================================================
-    # 任务接收
+    # 下一点接收
     # ================================================================
-    def on_task(self, msg: String):
+    def on_next(self, msg: String):
         point_id = msg.data.strip()
 
         if point_id not in self.points:
@@ -274,29 +304,60 @@ class MultiPointPatrol(Node):
 
         if self.state in (
             PatrolState.NAVIGATING,
+            PatrolState.SETTLING,
             PatrolState.DOCKING,
             PatrolState.UNDOCKING,
         ):
             self.get_logger().warn(
                 f"当前状态为 {self.state.value}，"
-                f"忽略新任务 {point_id}"
+                f"忽略新的下一点 {point_id}"
             )
             return
 
-        # 已经停靠在同一个点，直接报告到达。
-        if (
-            self.state == PatrolState.DOCKED
-            and self.current_point_id == point_id
-        ):
+        # current_point_id 只是上一次完成对接时记录的逻辑状态。
+        # 如果底盘被人工移动，需要用 map TF 核验这个状态是否仍然有效。
+        if self.current_point_id is not None:
+            current_xy = self.get_map_xy()
+
+            if current_xy is None:
+                self.get_logger().warn(
+                    "无法获取 map 到底盘的 TF，不能确认当前停靠位置；"
+                    f"暂不执行前往 {point_id} 号点，请稍后重试"
+                )
+                return
+
+            recorded_point = self.points[self.current_point_id]
+            distance_to_recorded_point = math.hypot(
+                current_xy[0] - recorded_point["x"],
+                current_xy[1] - recorded_point["y"],
+            )
+
+            if distance_to_recorded_point > self.docked_position_tolerance:
+                old_point_id = self.current_point_id
+                self.current_point_id = None
+                self.get_logger().warn(
+                    f"底盘距记录的 {old_point_id} 号停靠点 "
+                    f"{distance_to_recorded_point:.3f} m，超过 "
+                    f"{self.docked_position_tolerance:.3f} m；"
+                    "清除旧停靠状态，直接从当前位置导航"
+                )
+            else:
+                self.get_logger().info(
+                    f"底盘距记录的 {self.current_point_id} 号停靠点 "
+                    f"{distance_to_recorded_point:.3f} m，停靠状态有效"
+                )
+
+        # 确实停靠在同一个点，直接报告到达。
+        if self.current_point_id == point_id:
             self.get_logger().info(
-                f"当前已经停靠在 {point_id} 号点"
+                f"当前确实停靠在 {point_id} 号点"
             )
             self.publish_arrived(point_id)
             return
 
         self.target_point_id = point_id
 
-        # 当前停靠在某个点：必须先退出对接。
+        # 经 TF 确认仍停靠在其他点：必须先退出对接。
         if self.current_point_id is not None:
             self.start_relative_motion(PatrolState.UNDOCKING)
             return
@@ -349,10 +410,14 @@ class MultiPointPatrol(Node):
         )
 
         self.get_logger().info(
-            f"开始前往 {point_id} 号点，"
-            f"预停靠位置=({staging_x:.3f}, "
-            f"{staging_y:.3f}, "
-            f"{math.degrees(point['yaw']):.1f}deg)"
+            f"开始前往 {point_id} 号点"
+        )
+        self.get_logger().info(
+            f"预停靠点 A（最终点沿对接方向反推 "
+            f"{self.approach_distance:.3f} m）: "
+            f"x={staging_x:.3f}, y={staging_y:.3f}, "
+            f"yaw={point['yaw']:.4f} rad "
+            f"({math.degrees(point['yaw']):.1f} deg)"
         )
 
         send_future = self.nav_client.send_goal_async(goal)
@@ -391,14 +456,23 @@ class MultiPointPatrol(Node):
 
         self.get_logger().info(
             f"已到达 {self.target_point_id} 号点附近，"
-            "开始直线对接"
+            "等待舵轮回正"
         )
 
-        self.start_relative_motion(PatrolState.DOCKING)
+        self.start_steering_settle()
 
     # ================================================================
     # 对接和退出对接
     # ================================================================
+    def start_steering_settle(self):
+        self.publish_zero()
+        self.settle_started_at = self.get_clock().now()
+        self.set_state(
+            PatrolState.SETTLING,
+            f"持续零速度 {self.steering_settle_time:.1f} 秒，"
+            "等待舵轮回正",
+        )
+
     def start_relative_motion(self, new_state: PatrolState):
         self.publish_zero()
 
@@ -417,6 +491,23 @@ class MultiPointPatrol(Node):
         self.set_state(new_state, detail)
 
     def on_timer(self):
+        if self.state == PatrolState.SETTLING:
+            # 每个控制周期都发零速度，而不是只发一次，
+            # 给底盘足够时间将舵轮回正。
+            self.publish_zero()
+
+            elapsed = (
+                self.get_clock().now() - self.settle_started_at
+            ).nanoseconds / 1e9
+
+            if elapsed >= self.steering_settle_time:
+                self.settle_started_at = None
+                self.get_logger().info(
+                    "舵轮回正等待完成，开始直线对接"
+                )
+                self.start_relative_motion(PatrolState.DOCKING)
+            return
+
         if self.state not in (
             PatrolState.DOCKING,
             PatrolState.UNDOCKING,
@@ -554,6 +645,22 @@ class MultiPointPatrol(Node):
     # ================================================================
     # TF
     # ================================================================
+    def get_map_xy(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.1),
+            )
+        except TransformException:
+            return None
+
+        return (
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+        )
+
     def get_odom_xy(self):
         try:
             transform = self.tf_buffer.lookup_transform(

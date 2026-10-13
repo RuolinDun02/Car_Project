@@ -4,7 +4,8 @@
 
 功能：
   1. 订阅 /patrol/arrived，收到后 HTTP 调 8188 触发机械臂
-  2. 监听 8189 端口，收到 /api/arm_done 后发 /patrol/next 触发导航
+  2. 监听 8189 端口，收到 /api/arm_done 后发布下一点
+  3. 固定巡检顺序为 1 → 2 → 结束
 
 用法：
   ros2 run jy_tk arm_nav_bridge.py
@@ -29,7 +30,7 @@ from pydantic import BaseModel, Field
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import String
 
 
 class ArmDoneRequest(BaseModel):
@@ -58,10 +59,19 @@ class ArmNavBridge(Node):
         self.arm_speed = float(p('arm_speed').value)
         self.trigger_arm_on_arrive = bool(p('trigger_arm_on_arrive').value)
 
+        # 当前已到达并执行机械臂动作的点位。
+        self.current_point_id = None
+
+        # 固定巡检顺序：1 → 2 → 结束。
+        self.next_point_map = {
+            '1': '2',
+            '2': None,
+        }
+
         # ---------- ROS pub/sub ----------
         self.create_subscription(
             String, self.arrived_topic, self.on_arrived, 10)
-        self.next_pub = self.create_publisher(Bool, self.next_topic, 10)
+        self.next_pub = self.create_publisher(String, self.next_topic, 10)
 
         # ---------- HTTP server ----------
         self._app = self._build_fastapi()
@@ -83,6 +93,7 @@ class ArmNavBridge(Node):
     # ================================================================
     def on_arrived(self, msg: String):
         point_id = msg.data
+        self.current_point_id = point_id
         self.get_logger().info(f'导航到达 [{point_id}]')
 
         if not self.trigger_arm_on_arrive:
@@ -131,21 +142,46 @@ class ArmNavBridge(Node):
                 f'收到机械臂完成信号: arm={req.arm} '
                 f'result={req.result} point={req.point_id}')
 
-            msg = Bool()
-            msg.data = True
+            next_point_id = bridge.next_point_map.get(
+                bridge.current_point_id
+            )
+
+            if next_point_id is None:
+                bridge.get_logger().info(
+                    f'  ✅ 点位 {bridge.current_point_id} 任务完成，'
+                    '巡检结束')
+                return {
+                    'status': 'finished',
+                    'next_published': False,
+                }
+
+            msg = String()
+            msg.data = next_point_id
             bridge.next_pub.publish(msg)
 
             bridge.get_logger().info(
-                f'  ✅ 已发 {bridge.next_topic}，导航将前往下一个点')
-            return {'status': 'ok', 'next_published': True}
+                f'  ✅ 已发 {bridge.next_topic}={next_point_id}，'
+                f'导航将前往 {next_point_id} 号点')
+            return {
+                'status': 'ok',
+                'next_published': True,
+                'next_point_id': next_point_id,
+            }
 
         @app.post('/api/trigger_nav')
         async def trigger_nav(req: ArmDoneRequest):
-            """手动触发导航（和 arm_done 一样的效果）。"""
-            msg = Bool()
-            msg.data = True
+            """启动巡检，前往第一个点位。"""
+            msg = String()
+            msg.data = '1'
             bridge.next_pub.publish(msg)
-            return {'status': 'ok'}
+            bridge.get_logger().info(
+                f'  ✅ 已发 {bridge.next_topic}=1，'
+                '导航将前往 1 号点')
+            return {
+                'status': 'ok',
+                'next_published': True,
+                'next_point_id': '1',
+            }
 
         return app
 

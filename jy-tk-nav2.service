@@ -11,7 +11,7 @@ Type=simple
 User=jiayi
 Group=jiayi
 WorkingDirectory=/home/jiayi/Car_Project
-ExecStart=/home/jiayi/Car_Project/start_nav2.sh
+ExecStart=/home/jiayi/Car_Project/start_multipoint.sh
 
 # ★ 关键：停止和超时
 KillSignal=SIGINT
