@@ -18,7 +18,6 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     OpaqueFunction,
-    TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -51,7 +50,7 @@ def _make_pcl_to_scan(context):
         ],
         parameters=[{
             'target_frame': 'lidar_link',
-            'transform_tolerance': 0.5,
+            'transform_tolerance': 10.0,
             'min_height':  -0.2,
             'max_height':   0.2,
             'angle_min':  -3.14159,
@@ -63,7 +62,6 @@ def _make_pcl_to_scan(context):
             'use_inf': True,
             'use_sim_time': LaunchConfiguration('use_sim'),
         }],
-
 
     )
     return [pcl_to_scan]
@@ -123,16 +121,7 @@ def generate_launch_description():
     # ============================================================
     # 公共层：3D 点云 → 2D LaserScan
     # ============================================================
-    # pcl_to_scan_action = OpaqueFunction(function=_make_pcl_to_scan)
-    pcl_to_scan_action = TimerAction(
-        # Nav2 nodes create/activate several /scan subscriptions during their
-        # lifecycle bringup.  Starting this lazy-subscriber node in the middle
-        # of that transition can leave its cloud subscription alive in the
-        # graph but no longer forwarding data.  Start it after lifecycle
-        # activation has settled.
-        period=12.0,
-        actions=[OpaqueFunction(function=_make_pcl_to_scan)],
-    )
+    pcl_to_scan_action = OpaqueFunction(function=_make_pcl_to_scan)
 
     # ============================================================
     # 仿真硬件层

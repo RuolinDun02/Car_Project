@@ -1,0 +1,35 @@
+[Unit]
+Description=JY-TK Nav2 bringup
+Wants=network-online.target
+After=network-online.target
+
+# ★ 关键：这两个参数必须在 [Unit] 段
+# StartLimitIntervalSec=0：去掉"5 分钟内最多重启 5 次"的限制
+# StartLimitBurst=0：不限次数
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+User=jiayi
+Group=jiayi
+WorkingDirectory=/home/jiayi/Car_Project
+ExecStart=/home/jiayi/Car_Project/start_nav2.sh
+
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=30
+
+Restart=always
+RestartSec=10
+
+MemoryMax=2G
+MemoryHigh=1500M
+
+Environment="HOME=/home/jiayi"
+Environment="USER=jiayi"
+Environment=RCUTILS_COLORIZED_OUTPUT=0
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

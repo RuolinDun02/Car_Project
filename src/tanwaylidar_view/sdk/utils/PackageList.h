@@ -185,7 +185,7 @@ struct UDPPackage {
 
 class PackageList {
 public:
-  PackageList(int size = 4096);
+  PackageList(int size = 200000);
   ~PackageList();
 
   void PushPackage(UDPPackage::Ptr udpPackage);

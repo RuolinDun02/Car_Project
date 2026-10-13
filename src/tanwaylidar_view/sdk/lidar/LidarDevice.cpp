@@ -956,7 +956,7 @@ void LidarDevice::DecodeThread() {
       continue;
 
     if (packagePtr->m_length == 120) {
-      _packageList.PushFreePackage(packagePtr);
+      // _packageList.PushFreePackage(packagePtr);
       continue;
     }
 

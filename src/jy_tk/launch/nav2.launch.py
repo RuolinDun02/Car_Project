@@ -9,6 +9,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -57,6 +58,14 @@ def generate_launch_description():
         }.items(),
     )
 
+    # Start the hardware, static TF and cloud-to-scan node first.  The
+    # converter uses a lazy cloud subscription; bringing it up before Nav2
+    # creates its /scan subscribers avoids racing lifecycle transitions.
+    delayed_nav2_bringup = TimerAction(
+        period=5.0,
+        actions=[nav2_bringup],
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time', default_value='false',
@@ -77,5 +86,5 @@ def generate_launch_description():
             description='Nav2 参数文件',
         ),
         bringup_launch,
-        nav2_bringup,
+        delayed_nav2_bringup,
     ])

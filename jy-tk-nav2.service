@@ -3,9 +3,6 @@ Description=JY-TK Nav2 bringup
 Wants=network-online.target
 After=network-online.target
 
-# ★ 关键：这两个参数必须在 [Unit] 段
-# StartLimitIntervalSec=0：去掉"5 分钟内最多重启 5 次"的限制
-# StartLimitBurst=0：不限次数
 StartLimitIntervalSec=0
 StartLimitBurst=0
 
@@ -16,18 +13,26 @@ Group=jiayi
 WorkingDirectory=/home/jiayi/Car_Project
 ExecStart=/home/jiayi/Car_Project/start_nav2.sh
 
+# ★ 关键：停止和超时
 KillSignal=SIGINT
-KillMode=mixed
-TimeoutStopSec=30
+KillMode=control-group          # 从 mixed 改成 control-group
+TimeoutStartSec=600
+TimeoutStopSec=60               # 从 30 改成 60
+
+# ★ 启动前等待网络
+After=network-online.target
 
 Restart=always
-RestartSec=10
+RestartSec=30
 
-MemoryMax=2G
-MemoryHigh=1500M
+# ★ 内存限制放宽
+MemoryMax=4G                    # 从 2G 改成 4G
+MemoryHigh=3G
 
 Environment="HOME=/home/jiayi"
 Environment="USER=jiayi"
+Environment="ROS_DOMAIN_ID=0"                          # ★ 显式加
+Environment="RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"    # ★ 显式加
 Environment=RCUTILS_COLORIZED_OUTPUT=0
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
