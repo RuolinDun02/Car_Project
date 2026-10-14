@@ -3,17 +3,9 @@
 
 use_motor=true  → 启动电机驱动 + EKF
                   EKF 发 odom → base_footprint TF
+                  同时启动：反光条提取 + 对接控制器
 use_motor=false → 只启动雷达
                   静态 TF 发 odom → base_footprint（恒等变换）
-
-TF 树最终形态：
-  map                      ← slam_toolbox 发
-   └─ odom                 ← slam_toolbox 发
-       └─ base_footprint   ← EKF 发（use_motor=true）
-                          或 本文件的静态 TF（use_motor=false）
-           └─ base_link    ← URDF 发（robot_state_publisher）
-               └─ lidar_link
-                   └─ TanwayTP  ← 本文件的静态 TF（-90° 旋转）
 """
 
 import os
@@ -60,9 +52,6 @@ def generate_launch_description():
     )
 
     # ---------- 3) EKF 融合（只在 use_motor=true 时启动）----------
-    # 订阅 /odom_base + /tanwaylidar_imu
-    # 输出 /odom（重映射后）+ odom → base_footprint TF
-    # 注意：ekf.yaml 里 base_link_frame 必须是 base_footprint
     ekf_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(rl_share, 'launch', 'ekf.launch.py')
@@ -71,7 +60,6 @@ def generate_launch_description():
     )
 
     # ---------- 4) 静态 TF：odom → base_footprint ----------
-    # 只在 use_motor=false 时启动，避免和 EKF 的 TF 冲突。
     static_odom_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -87,9 +75,6 @@ def generate_launch_description():
     )
 
     # ---------- 5) 静态 TF：lidar_link → TanwayTP ----------
-    # 雷达点云 frame 是 TanwayTP，URDF 里雷达 frame 是 lidar_link，
-    # 用一个恒等变换把两者关联，TF 树才连通。
-    # 雷达顺时针旋转 90° 安装，用 -90° 的 Z 轴旋转补偿。
     lidar_frame_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -98,17 +83,14 @@ def generate_launch_description():
         arguments=[
             '--x', '0', '--y', '0', '--z', '0',
             '--qx', '0', '--qy', '0',
-            '--qz', '-0.7071068',    # sin(-45°)
-            '--qw', '0.7071068',     # cos(-45°)
+            '--qz', '-0.7071068',
+            '--qw', '0.7071068',
             '--frame-id', 'lidar_link',
             '--child-frame-id', 'TanwayTP',
         ],
     )
 
     # ---------- 6) cmd_vel → ctrl_cmd 桥接 ----------
-    # 订阅 /cmd_vel_smoothed（velocity_smoother 输出）
-    # 发布 /ctrl_cmd 给 yhs_can_control_node
-    # 只在 use_motor=true 时启动（需要底盘驱动在运行）
     cmd_vel_bridge = Node(
         package='yhs_can_control',
         executable='cmd_vel_to_ctrl_cmd_bridge',
@@ -124,6 +106,76 @@ def generate_launch_description():
         }],
     )
 
+    # ---------- 7) ★ 反光条直线提取 ----------
+    tanway_line_extractor = Node(
+        package='tanway_line_extractor',
+        executable='tanway_line_extractor_node',
+        name='tanway_line_extractor',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(use_motor),
+        parameters=[{
+            'cloud_topic': '/tanwaylidar_pointcloud',
+            'lines_topic': '/tanway_lines',
+            'markers_topic': '/tanway_line_markers',
+            'frame_id': 'lidar_link',
+            'extraction_mode': '3d_cluster',
+            'reflective_threshold': 100.0,
+            'cluster_eps': 0.08,
+            'cluster_min_pts': 15,
+            'linearity_threshold': 8.0,
+            'reflective_line_min_length': 0.20,
+            'reflective_line_max_length': 3.00,
+            'reflective_z_min': -0.50,
+            'reflective_z_max': 1.50,
+            'processing_rate': 10.0,
+            'cloud_queue_size': 3,
+            'publish_refl_cloud': True,
+            'refl_cloud_topic': '/tanway_reflective_points',
+        }],
+    )
+
+    # ---------- 8) ★ 对接控制器 ----------
+    docking_controller = Node(
+        package='jy_tk',
+        executable='docking_controller.py',
+        name='docking_controller',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(use_motor),
+        parameters=[{
+            'lines_topic': '/tanway_lines',
+            'cmd_vel_topic': '/cmd_vel_smoothed',
+            'request_topic': '/docking/request',
+            'complete_topic': '/docking/complete',
+            'state_topic': '/docking/state',
+            'odom_frame': 'odom',
+            'base_frame': 'base_footprint',
+            'min_line_length': 0.15,
+            'max_line_length': 1.50,
+            'min_target_x': 0.20,
+            'max_target_x': 3.00,
+            'max_target_y': 0.80,
+            'target_distance': 0.25,
+            'distance_tolerance': 0.05,
+            'lateral_tolerance': 0.03,
+            'kp_lateral': 1.5,
+            'kp_yaw': 2.0,
+            'vx_max': 0.10,
+            'vx_min': 0.03,
+            'wz_max': 0.40,
+            'wait_lines_timeout': 3.0,
+            'line_lost_timeout': 1.0,
+            'align_overall_timeout': 30.0,
+            'fallback_dock_speed': 0.08,
+            'fallback_dock_distance': 0.7,
+            'fallback_timeout': 20.0,
+            'control_rate': 20.0,
+        }],
+    )
+
     return LaunchDescription([
         use_motor_arg,
         motor_node,
@@ -132,4 +184,6 @@ def generate_launch_description():
         static_odom_tf,
         lidar_frame_tf,
         cmd_vel_bridge,
+        tanway_line_extractor,   # ★ 新增
+        docking_controller,      # ★ 新增
     ])

@@ -22,6 +22,14 @@ multi_point_patrol:
     # 与记录停靠点的地图距离不超过该值，才认为仍停靠在该点。
     docked_position_tolerance: 0.5
 
+    # 每次节点启动后的第一次导航前执行：后退 → 旋转 360 度 → 等待。
+    initial_backup_distance: 1.0
+    initial_backup_speed: 0.15
+    initial_backup_timeout: 10.0
+    initial_spin_speed_deg: 60.0
+    initial_spin_timeout: 60.0
+    initial_wait_after_spin: 2.0
+
     # 简易直线对接。
     dock_speed: 0.08
     dock_distance: 0.7

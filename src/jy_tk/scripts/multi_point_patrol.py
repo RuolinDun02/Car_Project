@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 
 """
-独立多点巡检节点。
+独立多点巡检节点（对接交给 docking_controller）。
 
 流程：
   IDLE
+    → INITIAL_BACKUP   第一次导航前直线后退
+    → INITIAL_SPIN_360 第一次导航前原地旋转 360 度
+    → INITIAL_WAIT     旋转完成后短暂停稳
     → NAVIGATING       Nav2 导航到目标点前方
     → SETTLING         持续发布零速度，等待舵轮回正
-    → DOCKING          直线低速前进，模拟精对接
+    → DOCKING          请求 docking_controller 对接，等 /docking/complete
     → DOCKED           发布到达消息，等待下一点
     → UNDOCKING        收到下一点后，先直线后退
     → NAVIGATING       前往下一个点
 
 下一点输入：
   /patrol/next         std_msgs/msg/String
-  data 为点号，例如 "1"、"2"
+  数据为点号，如 "1"、"2"
+
+对接接口：
+  /docking/request     std_msgs/msg/String   发 "start"（或点号）
+  /docking/complete    std_msgs/msg/String   收 "aligned"/"fallback"/"failed"
 
 对外输出：
   /patrol/arrived      std_msgs/msg/String
@@ -37,10 +44,6 @@
   3. 跳过机械臂桥接，直接发布点位 2：
      ros2 topic pub --once /patrol/next std_msgs/msg/String \
        "{data: '2'}"
-
-说明：
-  当前对接和退出均使用 odom 位移判断。
-  后续接入反光条点云分割时，只需要替换 DOCKING 部分。
 """
 
 import math
@@ -67,6 +70,9 @@ from tf2_ros import TransformException
 
 class PatrolState(Enum):
     IDLE = "IDLE"
+    INITIAL_BACKUP = "INITIAL_BACKUP"
+    INITIAL_SPIN_360 = "INITIAL_SPIN_360"
+    INITIAL_WAIT = "INITIAL_WAIT"
     NAVIGATING = "NAVIGATING"
     SETTLING = "SETTLING"
     DOCKING = "DOCKING"
@@ -82,9 +88,6 @@ class MultiPointPatrol(Node):
 
         # ------------------------------------------------------------
         # 点位配置
-        #
-        # point_ids 和 point_poses 一一对应。
-        # 每个点的 pose 为最终对接完成位姿：[x, y, yaw]。
         # ------------------------------------------------------------
         self.declare_parameter("point_ids", ["1", "2"])
         self.declare_parameter(
@@ -101,9 +104,15 @@ class MultiPointPatrol(Node):
         # 收到新目标时，用地图坐标核验记录的停靠点是否仍然有效。
         self.declare_parameter("docked_position_tolerance", 0.5)
 
-        # 直线对接参数。
-        self.declare_parameter("dock_speed", 0.08)
-        self.declare_parameter("dock_distance", 0.7)
+        # 节点启动后的第一次导航前，先后退、旋转一周并短暂停稳。
+        self.declare_parameter("initial_backup_distance", 1.0)
+        self.declare_parameter("initial_backup_speed", 0.15)
+        self.declare_parameter("initial_backup_timeout", 10.0)
+        self.declare_parameter("initial_spin_speed_deg", 60.0)
+        self.declare_parameter("initial_spin_timeout", 60.0)
+        self.declare_parameter("initial_wait_after_spin", 2.0)
+
+        # 舵轮回正等待
         self.declare_parameter("steering_settle_time", 1.5)
 
         # 离开当前停靠点的直线后退参数。
@@ -111,15 +120,20 @@ class MultiPointPatrol(Node):
         self.declare_parameter("undock_distance", 0.7)
 
         self.declare_parameter("motion_timeout", 20.0)
+        # ★ 对接总超时（docking_controller 内部有自己的超时）
+        self.declare_parameter("docking_timeout", 60.0)
         self.declare_parameter("control_rate", 20.0)
 
         # 直线运动发到 velocity_smoother 的输入。
-        # velocity_smoother 再输出 /cmd_vel_smoothed 给底盘桥接节点。
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_smoothed")
 
         self.declare_parameter("next_topic", "/patrol/next")
         self.declare_parameter("arrived_topic", "/patrol/arrived")
         self.declare_parameter("state_topic", "/patrol/state")
+
+        # ★ 对接控制器接口
+        self.declare_parameter("docking_request_topic", "/docking/request")
+        self.declare_parameter("docking_complete_topic", "/docking/complete")
 
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("odom_frame", "odom")
@@ -134,11 +148,23 @@ class MultiPointPatrol(Node):
         self.docked_position_tolerance = max(0.0, float(
             self.get_parameter("docked_position_tolerance").value
         ))
-        self.dock_speed = abs(float(
-            self.get_parameter("dock_speed").value
+        self.initial_backup_distance = abs(float(
+            self.get_parameter("initial_backup_distance").value
         ))
-        self.dock_distance = abs(float(
-            self.get_parameter("dock_distance").value
+        self.initial_backup_speed = abs(float(
+            self.get_parameter("initial_backup_speed").value
+        ))
+        self.initial_backup_timeout = max(0.0, float(
+            self.get_parameter("initial_backup_timeout").value
+        ))
+        self.initial_spin_speed_deg = abs(float(
+            self.get_parameter("initial_spin_speed_deg").value
+        ))
+        self.initial_spin_timeout = max(0.0, float(
+            self.get_parameter("initial_spin_timeout").value
+        ))
+        self.initial_wait_after_spin = max(0.0, float(
+            self.get_parameter("initial_wait_after_spin").value
         ))
         self.steering_settle_time = max(0.0, float(
             self.get_parameter("steering_settle_time").value
@@ -151,6 +177,9 @@ class MultiPointPatrol(Node):
         ))
         self.motion_timeout = float(
             self.get_parameter("motion_timeout").value
+        )
+        self.docking_timeout = float(
+            self.get_parameter("docking_timeout").value
         )
         self.control_rate = float(
             self.get_parameter("control_rate").value
@@ -167,6 +196,12 @@ class MultiPointPatrol(Node):
         )
         self.state_topic = str(
             self.get_parameter("state_topic").value
+        )
+        self.docking_request_topic = str(
+            self.get_parameter("docking_request_topic").value
+        )
+        self.docking_complete_topic = str(
+            self.get_parameter("docking_complete_topic").value
         )
 
         self.map_frame = str(
@@ -203,21 +238,23 @@ class MultiPointPatrol(Node):
         # ------------------------------------------------------------
         self.state = PatrolState.IDLE
 
-        # 当前准备前往的目标点。
         self.target_point_id = None
-
-        # 当前已经完成对接的点。
-        # None 表示当前没有停靠在任何巡检点。
         self.current_point_id = None
 
-        # 直线运动开始位置和时间。
+        self.initial_prepare_completed = False
+        self.initial_stage_started_at = None
+        self.initial_backup_origin = None
+        self.initial_last_yaw = None
+        self.initial_accumulated_yaw = 0.0
+
         self.motion_origin = None
         self.motion_started_at = None
 
-        # Nav2 到达后的舵轮回正等待起始时间。
         self.settle_started_at = None
 
-        # 当前 NavigateToPose goal handle。
+        # ★ 对接阶段起始时间
+        self.docking_started_at = None
+
         self.nav_goal_handle = None
 
         # ------------------------------------------------------------
@@ -254,6 +291,13 @@ class MultiPointPatrol(Node):
             10,
         )
 
+        # ★ 对接请求发布者
+        self.docking_request_pub = self.create_publisher(
+            String,
+            self.docking_request_topic,
+            10,
+        )
+
         state_qos = QoSProfile(depth=1)
         state_qos.reliability = ReliabilityPolicy.RELIABLE
         state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -271,6 +315,14 @@ class MultiPointPatrol(Node):
             10,
         )
 
+        # ★ 对接完成订阅
+        self.docking_complete_sub = self.create_subscription(
+            String,
+            self.docking_complete_topic,
+            self.on_docking_complete,
+            10,
+        )
+
         self.timer = self.create_timer(
             1.0 / self.control_rate,
             self.on_timer,
@@ -278,7 +330,8 @@ class MultiPointPatrol(Node):
 
         self.publish_state()
 
-        self.get_logger().info("独立多点巡检节点已启动")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("独立多点巡检节点已启动（对接由 docking_controller 执行）")
         self.get_logger().info(
             f"可用巡检点: {list(self.points.keys())}"
         )
@@ -288,6 +341,13 @@ class MultiPointPatrol(Node):
         self.get_logger().info(
             f"到达话题: {self.arrived_topic}"
         )
+        self.get_logger().info(
+            f"对接请求: {self.docking_request_topic}"
+        )
+        self.get_logger().info(
+            f"对接完成: {self.docking_complete_topic}"
+        )
+        self.get_logger().info("=" * 60)
 
     # ================================================================
     # 下一点接收
@@ -297,32 +357,35 @@ class MultiPointPatrol(Node):
 
         if point_id not in self.points:
             self.get_logger().error(
-                f"未知巡检点: {point_id}，"
+                f"下一点处理失败；下一点位={point_id}；"
+                f"未知巡检点，"
                 f"可用点位: {list(self.points.keys())}"
             )
             return
 
         if self.state in (
+            PatrolState.INITIAL_BACKUP,
+            PatrolState.INITIAL_SPIN_360,
+            PatrolState.INITIAL_WAIT,
             PatrolState.NAVIGATING,
             PatrolState.SETTLING,
             PatrolState.DOCKING,
             PatrolState.UNDOCKING,
         ):
             self.get_logger().warn(
-                f"当前状态为 {self.state.value}，"
-                f"忽略新的下一点 {point_id}"
+                f"下一点处理失败；下一点位={point_id}；"
+                f"当前状态为 {self.state.value}，忽略请求"
             )
             return
 
-        # current_point_id 只是上一次完成对接时记录的逻辑状态。
-        # 如果底盘被人工移动，需要用 map TF 核验这个状态是否仍然有效。
         if self.current_point_id is not None:
             current_xy = self.get_map_xy()
 
             if current_xy is None:
                 self.get_logger().warn(
-                    "无法获取 map 到底盘的 TF，不能确认当前停靠位置；"
-                    f"暂不执行前往 {point_id} 号点，请稍后重试"
+                    f"下一点处理失败；下一点位={point_id}；"
+                    "无法获取 map 到底盘的 TF，不能确认当前停靠位置，"
+                    "请稍后重试"
                 )
                 return
 
@@ -347,23 +410,202 @@ class MultiPointPatrol(Node):
                     f"{distance_to_recorded_point:.3f} m，停靠状态有效"
                 )
 
-        # 确实停靠在同一个点，直接报告到达。
         if self.current_point_id == point_id:
             self.get_logger().info(
-                f"当前确实停靠在 {point_id} 号点"
+                f"下一点处理成功；下一点位={point_id}；"
+                "当前已经停靠在该点"
             )
             self.publish_arrived(point_id)
             return
 
         self.target_point_id = point_id
 
-        # 经 TF 确认仍停靠在其他点：必须先退出对接。
         if self.current_point_id is not None:
+            self.get_logger().info(
+                f"下一点处理成功；下一点位={point_id}；"
+                f"先退出 {self.current_point_id} 号点"
+            )
             self.start_relative_motion(PatrolState.UNDOCKING)
             return
 
-        # 当前没有停靠：直接开始导航。
+        if not self.initial_prepare_completed:
+            self.get_logger().info(
+                f"下一点处理成功；下一点位={point_id}；"
+                "开始首次导航前准备"
+            )
+            self.start_initial_backup()
+            return
+
         self.start_navigation(point_id)
+
+    # ================================================================
+    # ★ 对接完成回调
+    # ================================================================
+    def on_docking_complete(self, msg: String):
+        """收到 docking_controller 的完成信号。"""
+        if self.state != PatrolState.DOCKING:
+            self.get_logger().warn(
+                f"当前状态 {self.state.value}，忽略对接完成信号"
+            )
+            return
+
+        result = msg.data.strip()
+        self.get_logger().info(f"收到对接完成信号: {result}")
+
+        if result in ("aligned", "fallback"):
+            self.finish_docking()
+        else:
+            self.fail(f"对接失败: {result}")
+
+    # ================================================================
+    # 第一次导航前准备
+    # ================================================================
+    def start_initial_backup(self):
+        self.publish_zero()
+        self.initial_stage_started_at = self.get_clock().now()
+
+        pose = self.get_map_pose()
+        if pose is None:
+            self.initial_backup_origin = None
+        else:
+            self.initial_backup_origin = (pose[0], pose[1])
+
+        self.set_state(
+            PatrolState.INITIAL_BACKUP,
+            f"第一次导航前后退 {self.initial_backup_distance:.3f} m；"
+            f"下一点位={self.target_point_id}",
+        )
+
+    def start_initial_spin(self):
+        self.publish_zero()
+        self.initial_stage_started_at = self.get_clock().now()
+
+        pose = self.get_map_pose()
+        self.initial_last_yaw = None if pose is None else pose[2]
+        self.initial_accumulated_yaw = 0.0
+
+        self.set_state(
+            PatrolState.INITIAL_SPIN_360,
+            f"第一次导航前旋转 360 度；"
+            f"下一点位={self.target_point_id}",
+        )
+
+    def start_initial_wait(self):
+        self.publish_zero()
+        self.initial_stage_started_at = self.get_clock().now()
+        self.set_state(
+            PatrolState.INITIAL_WAIT,
+            f"旋转完成后等待 {self.initial_wait_after_spin:.1f} 秒；"
+            f"下一点位={self.target_point_id}",
+        )
+
+    def finish_initial_prepare(self):
+        self.publish_zero()
+        self.initial_prepare_completed = True
+        self.initial_stage_started_at = None
+        self.initial_backup_origin = None
+        self.initial_last_yaw = None
+
+        point_id = self.target_point_id
+        if point_id is None:
+            self.fail("首次导航准备完成，但下一点位为空")
+            return
+
+        self.get_logger().info(
+            f"首次导航前准备完成；下一点位={point_id}"
+        )
+        self.start_navigation(point_id)
+
+    def do_initial_backup(self):
+        if self.initial_stage_elapsed() > self.initial_backup_timeout:
+            self.get_logger().warn(
+                f"首次后退超时；下一点位={self.target_point_id}；"
+                "继续执行旋转"
+            )
+            self.start_initial_spin()
+            return
+
+        pose = self.get_map_pose()
+        if pose is None:
+            self.get_logger().warn(
+                f"首次后退无法获取位姿；下一点位={self.target_point_id}；"
+                "跳过后退，继续执行旋转"
+            )
+            self.start_initial_spin()
+            return
+
+        if self.initial_backup_origin is None:
+            self.initial_backup_origin = (pose[0], pose[1])
+            return
+
+        dx = pose[0] - self.initial_backup_origin[0]
+        dy = pose[1] - self.initial_backup_origin[1]
+        distance = math.hypot(dx, dy)
+
+        if distance >= self.initial_backup_distance:
+            self.get_logger().info(
+                f"首次后退完成 ({distance:.3f} m)；"
+                f"下一点位={self.target_point_id}"
+            )
+            self.start_initial_spin()
+            return
+
+        self.publish_velocity(-self.initial_backup_speed)
+
+    def do_initial_spin(self):
+        if self.initial_stage_elapsed() > self.initial_spin_timeout:
+            self.get_logger().warn(
+                "首次旋转 360 度超时"
+                f"（累计 {math.degrees(self.initial_accumulated_yaw):.1f} 度）；"
+                f"下一点位={self.target_point_id}；继续导航"
+            )
+            self.start_initial_wait()
+            return
+
+        pose = self.get_map_pose()
+        if pose is None:
+            self.get_logger().warn(
+                f"首次旋转无法获取位姿；下一点位={self.target_point_id}；"
+                "跳过旋转，继续导航"
+            )
+            self.start_initial_wait()
+            return
+
+        current_yaw = pose[2]
+        if self.initial_last_yaw is None:
+            self.initial_last_yaw = current_yaw
+            return
+
+        delta = self.normalize_angle(current_yaw - self.initial_last_yaw)
+        self.initial_accumulated_yaw += delta
+        self.initial_last_yaw = current_yaw
+
+        if abs(self.initial_accumulated_yaw) >= 2.0 * math.pi:
+            self.get_logger().info(
+                "首次旋转 360 度完成"
+                f"（累计 {math.degrees(self.initial_accumulated_yaw):.1f} 度）；"
+                f"下一点位={self.target_point_id}"
+            )
+            self.start_initial_wait()
+            return
+
+        self.publish_velocity(
+            0.0,
+            math.radians(self.initial_spin_speed_deg),
+        )
+
+    def do_initial_wait(self):
+        self.publish_zero()
+        if self.initial_stage_elapsed() < self.initial_wait_after_spin:
+            return
+        self.finish_initial_prepare()
+
+    def initial_stage_elapsed(self):
+        if self.initial_stage_started_at is None:
+            return 0.0
+        return (
+            self.get_clock().now() - self.initial_stage_started_at
+        ).nanoseconds / 1e9
 
     # ================================================================
     # Nav2 导航
@@ -371,8 +613,6 @@ class MultiPointPatrol(Node):
     def start_navigation(self, point_id: str):
         point = self.points[point_id]
 
-        # point 表示最终对接位姿。
-        # Nav2 目标设置在该点后方 approach_distance 米处。
         staging_x = (
             point["x"]
             - self.approach_distance * math.cos(point["yaw"])
@@ -410,6 +650,7 @@ class MultiPointPatrol(Node):
         )
 
         self.get_logger().info(
+            f"下一点处理成功；下一点位={point_id}；"
             f"开始前往 {point_id} 号点"
         )
         self.get_logger().info(
@@ -462,7 +703,7 @@ class MultiPointPatrol(Node):
         self.start_steering_settle()
 
     # ================================================================
-    # 对接和退出对接
+    # 舵轮回正
     # ================================================================
     def start_steering_settle(self):
         self.publish_zero()
@@ -473,27 +714,62 @@ class MultiPointPatrol(Node):
             "等待舵轮回正",
         )
 
+    # ================================================================
+    # ★ 对接：发请求 + 等待完成
+    # ================================================================
+    def start_docking(self):
+        """向 docking_controller 发对接请求，进入 DOCKING 状态。"""
+        self.publish_zero()
+        self.docking_started_at = self.get_clock().now()
+
+        req = String()
+        req.data = self.target_point_id if self.target_point_id else "start"
+        self.docking_request_pub.publish(req)
+
+        self.set_state(
+            PatrolState.DOCKING,
+            f"请求 docking_controller 对接 {self.target_point_id} 号点",
+        )
+        self.get_logger().info(
+            f"已发对接请求: {req.data}"
+        )
+
+    # ================================================================
+    # 退出对接（纯直线后退，不涉及反光条）
+    # ================================================================
     def start_relative_motion(self, new_state: PatrolState):
         self.publish_zero()
 
         self.motion_origin = self.get_odom_xy()
         self.motion_started_at = self.get_clock().now()
 
-        if new_state == PatrolState.DOCKING:
-            detail = (
-                f"向前对接 {self.target_point_id} 号点"
-            )
-        else:
+        if new_state == PatrolState.UNDOCKING:
             detail = (
                 f"退出 {self.current_point_id} 号点"
             )
+        else:
+            detail = new_state.value
 
         self.set_state(new_state, detail)
 
+    # ================================================================
+    # 主循环
+    # ================================================================
     def on_timer(self):
+        if self.state == PatrolState.INITIAL_BACKUP:
+            self.do_initial_backup()
+            return
+
+        if self.state == PatrolState.INITIAL_SPIN_360:
+            self.do_initial_spin()
+            return
+
+        if self.state == PatrolState.INITIAL_WAIT:
+            self.do_initial_wait()
+            return
+
+        # -------- SETTLING --------
         if self.state == PatrolState.SETTLING:
-            # 每个控制周期都发零速度，而不是只发一次，
-            # 给底盘足够时间将舵轮回正。
             self.publish_zero()
 
             elapsed = (
@@ -503,15 +779,27 @@ class MultiPointPatrol(Node):
             if elapsed >= self.steering_settle_time:
                 self.settle_started_at = None
                 self.get_logger().info(
-                    "舵轮回正等待完成，开始直线对接"
+                    "舵轮回正等待完成，请求对接"
                 )
-                self.start_relative_motion(PatrolState.DOCKING)
+                self.start_docking()
             return
 
-        if self.state not in (
-            PatrolState.DOCKING,
-            PatrolState.UNDOCKING,
-        ):
+        # -------- ★ DOCKING：等 docking_controller 完成 --------
+        if self.state == PatrolState.DOCKING:
+            if self.docking_started_at is None:
+                return
+            elapsed = (
+                self.get_clock().now() - self.docking_started_at
+            ).nanoseconds / 1e9
+            if elapsed > self.docking_timeout:
+                self.publish_zero()
+                self.fail(
+                    f"对接超时，{self.docking_timeout:.1f}s 未收到完成信号"
+                )
+            return
+
+        # -------- UNDOCKING：直线后退 --------
+        if self.state != PatrolState.UNDOCKING:
             return
 
         elapsed = (
@@ -539,21 +827,15 @@ class MultiPointPatrol(Node):
         dy = current_xy[1] - self.motion_origin[1]
         distance = math.hypot(dx, dy)
 
-        if self.state == PatrolState.DOCKING:
-            if distance >= self.dock_distance:
-                self.finish_docking()
-                return
-
-            self.publish_velocity(self.dock_speed)
+        if distance >= self.undock_distance:
+            self.finish_undocking()
             return
 
-        if self.state == PatrolState.UNDOCKING:
-            if distance >= self.undock_distance:
-                self.finish_undocking()
-                return
+        self.publish_velocity(-self.undock_speed)
 
-            self.publish_velocity(-self.undock_speed)
-
+    # ================================================================
+    # 完成
+    # ================================================================
     def finish_docking(self):
         self.publish_zero()
 
@@ -562,13 +844,13 @@ class MultiPointPatrol(Node):
 
         self.motion_origin = None
         self.motion_started_at = None
+        self.docking_started_at = None
 
         self.set_state(
             PatrolState.DOCKED,
             f"已完成 {point_id} 号点对接",
         )
 
-        # 只有对接完成后才发布到达消息。
         self.publish_arrived(point_id)
 
     def finish_undocking(self):
@@ -591,11 +873,15 @@ class MultiPointPatrol(Node):
     # ================================================================
     # 发布
     # ================================================================
-    def publish_velocity(self, linear_x: float):
+    def publish_velocity(
+        self,
+        linear_x: float,
+        angular_z: float = 0.0,
+    ):
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.linear.y = 0.0
-        msg.angular.z = 0.0
+        msg.angular.z = float(angular_z)
         self.cmd_pub.publish(msg)
 
     def publish_zero(self):
@@ -639,13 +925,17 @@ class MultiPointPatrol(Node):
 
     def fail(self, reason: str):
         self.publish_zero()
-        self.set_state(PatrolState.FAILED, reason)
-        self.get_logger().error(reason)
+        next_point_id = self.target_point_id or "None"
+        detail = f"{reason}；下一点位={next_point_id}"
+        self.set_state(PatrolState.FAILED, detail)
+        self.get_logger().error(
+            f"任务失败；下一点位={next_point_id}；{reason}"
+        )
 
     # ================================================================
     # TF
     # ================================================================
-    def get_map_xy(self):
+    def get_map_pose(self):
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.map_frame,
@@ -656,10 +946,38 @@ class MultiPointPatrol(Node):
         except TransformException:
             return None
 
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (
+                rotation.w * rotation.z
+                + rotation.x * rotation.y
+            ),
+            1.0 - 2.0 * (
+                rotation.y * rotation.y
+                + rotation.z * rotation.z
+            ),
+        )
+
         return (
             transform.transform.translation.x,
             transform.transform.translation.y,
+            yaw,
         )
+
+    def get_map_xy(self):
+        pose = self.get_map_pose()
+        if pose is None:
+            return None
+
+        return pose[0], pose[1]
+
+    @staticmethod
+    def normalize_angle(angle: float):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
 
     def get_odom_xy(self):
         try:

@@ -97,8 +97,8 @@ TanwayLineExtractor::TanwayLineExtractor()
 
   /* ---- 性能参数 ---- */
   processing_rate_     = declare_parameter<double>("processing_rate",     10.0);
-  max_points_per_ring_ = declare_parameter<int>   ("max_points_per_ring", 1800);
-  cloud_queue_size_    = declare_parameter<int>   ("cloud_queue_size",    3);
+  max_points_per_ring_ = declare_parameter<int>   ("max_points_per_ring", 500);
+  cloud_queue_size_    = declare_parameter<int>   ("cloud_queue_size",    1);
 
   /* =====================================================
    * 参数合法性检查

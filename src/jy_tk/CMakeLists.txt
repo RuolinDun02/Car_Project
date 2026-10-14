@@ -16,6 +16,7 @@ install(PROGRAMS
   scripts/motor_watchdog.py
   scripts/multi_point_patrol.py
   scripts/arm_nav_bridge.py 
+  scripts/docking_controller.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

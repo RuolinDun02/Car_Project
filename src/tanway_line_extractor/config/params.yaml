@@ -55,8 +55,8 @@ tanway_line_extractor:
 
     # ===== 性能参数 =====
     processing_rate: 10.0
-    max_points_per_ring: 1800
-    cloud_queue_size: 3
+    max_points_per_ring: 500
+    cloud_queue_size: 1
 
         # ===== 调试点云发布 =====
     # 发布强度筛选后的高反光点云（PointCloud2）

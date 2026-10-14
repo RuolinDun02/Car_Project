@@ -76,6 +76,13 @@ public:
 #elif defined(USE_FOR_ROS2)
 		sensor_msgs::msg::PointCloud2 rosPointCloud;
 		pcl::toROSMsg(pointCloud, rosPointCloud); // convert between PCL and ROS datatypes
+			// Use the publish-time system clock when lidar clock synchronization is
+			// disabled.  The SDK timestamps packets when they enter its internal
+			// queue; under load that queue can lag far behind TF and AMCL.
+			if (!launchConfig.m_useLidarTime) {
+				static rclcpp::Clock systemClock(RCL_SYSTEM_TIME);
+				rosPointCloud.header.stamp = systemClock.now();
+			}
 		rosPublisher->publish(rosPointCloud);	  // Publish point cloud
 #elif DISABLE_PCL_ROS
 		// to ros point cloud
@@ -125,8 +132,13 @@ public:
 		imu_data.header.stamp = ros::Time(sec, nsec);
 		rosIMUPublisher.publish(imu_data); // Publish IMU
 #elif defined(USE_FOR_ROS2)
-		imu_data.header.stamp.sec = sec;
-    	imu_data.header.stamp.nanosec = nsec;
+			if (launchConfig.m_useLidarTime) {
+				imu_data.header.stamp.sec = sec;
+	    		imu_data.header.stamp.nanosec = nsec;
+			} else {
+				static rclcpp::Clock systemClock(RCL_SYSTEM_TIME);
+				imu_data.header.stamp = systemClock.now();
+			}
 		rosIMUPublisher->publish(imu_data); // Publish IMU
 #endif
 	}
@@ -367,8 +379,14 @@ int main(int argc, char **argv)
 	RCLCPP_INFO(node->get_logger(), "Version 3.0.19, 2025-03-27.\n");
 	RCLCPP_INFO(node->get_logger(), "View in rviz2.\n");
 
-	rosPublisher = node->create_publisher<sensor_msgs::msg::PointCloud2>(launchConfig.m_topic, 1);
-	rosIMUPublisher = node->create_publisher<sensor_msgs::msg::Imu>(launchConfig.m_imuTopic, 1);
+	// Sensor streams should never block the SDK decode thread waiting for slow
+	// subscribers.  Keeping only the newest sample also avoids visible replay
+	// of stale point clouds after temporary CPU/DDS congestion.
+	auto sensorQos = rclcpp::SensorDataQoS().keep_last(1);
+	rosPublisher = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+		launchConfig.m_topic, sensorQos);
+	rosIMUPublisher = node->create_publisher<sensor_msgs::msg::Imu>(
+		launchConfig.m_imuTopic, sensorQos);
 #endif
 
 	LidarObserver lidarObserver;

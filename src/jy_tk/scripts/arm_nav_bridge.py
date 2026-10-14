@@ -146,24 +146,84 @@ class ArmNavBridge(Node):
                 bridge.current_point_id
             )
 
+            if req.result.strip().lower() != 'ok':
+                message = (
+                    f'机械臂任务失败，未发布下一点；'
+                    f'下一点位={next_point_id}'
+                )
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
+            if bridge.current_point_id is None:
+                message = '尚未收到导航到达消息；下一点位=None'
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': None,
+                }
+
+            if req.point_id and req.point_id != bridge.current_point_id:
+                message = (
+                    f'上报点位 {req.point_id} 与当前点位 '
+                    f'{bridge.current_point_id} 不一致；'
+                    f'下一点位={next_point_id}'
+                )
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
             if next_point_id is None:
                 bridge.get_logger().info(
                     f'  ✅ 点位 {bridge.current_point_id} 任务完成，'
-                    '巡检结束')
+                    '巡检结束；下一点位=None')
                 return {
                     'status': 'finished',
+                    'success': True,
+                    'message': '巡检结束；下一点位=None',
                     'next_published': False,
+                    'next_point_id': None,
                 }
 
             msg = String()
             msg.data = next_point_id
-            bridge.next_pub.publish(msg)
+            try:
+                bridge.next_pub.publish(msg)
+            except Exception as exception:
+                message = (
+                    f'发布 {bridge.next_topic} 失败: {exception}；'
+                    f'下一点位={next_point_id}'
+                )
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
 
             bridge.get_logger().info(
                 f'  ✅ 已发 {bridge.next_topic}={next_point_id}，'
-                f'导航将前往 {next_point_id} 号点')
+                f'导航将前往 {next_point_id} 号点；'
+                f'下一点位={next_point_id}')
             return {
                 'status': 'ok',
+                'success': True,
+                'message': f'发布成功；下一点位={next_point_id}',
                 'next_published': True,
                 'next_point_id': next_point_id,
             }
@@ -171,16 +231,34 @@ class ArmNavBridge(Node):
         @app.post('/api/trigger_nav')
         async def trigger_nav(req: ArmDoneRequest):
             """启动巡检，前往第一个点位。"""
+            next_point_id = '1'
             msg = String()
-            msg.data = '1'
-            bridge.next_pub.publish(msg)
+            msg.data = next_point_id
+            try:
+                bridge.next_pub.publish(msg)
+            except Exception as exception:
+                message = (
+                    f'发布 {bridge.next_topic} 失败: {exception}；'
+                    f'下一点位={next_point_id}'
+                )
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
             bridge.get_logger().info(
                 f'  ✅ 已发 {bridge.next_topic}=1，'
-                '导航将前往 1 号点')
+                '导航将前往 1 号点；下一点位=1')
             return {
                 'status': 'ok',
+                'success': True,
+                'message': '发布成功；下一点位=1',
                 'next_published': True,
-                'next_point_id': '1',
+                'next_point_id': next_point_id,
             }
 
         return app
