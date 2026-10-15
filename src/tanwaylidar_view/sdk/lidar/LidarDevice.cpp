@@ -944,19 +944,72 @@ void LidarDevice::ReadFromLocalThread() {
 }
 
 void LidarDevice::DecodeThread() {
+  // This is a live sensor stream, not a recorder.  At roughly 5000 packets/s,
+  // the original 200000-packet queue can hide almost 40 seconds of latency.
+  // Once its free pool is exhausted, ReadFromNetworkThread() reuses the oldest
+  // unparsed buffer, interleaving old and current scan periods and publishing
+  // partial sectors.  Bound TW360 latency and always resume at packet 1 so a
+  // skipped scan can never be combined with another scan.
+  constexpr int kTw360BacklogLimit = 2500;  // approximately 0.5 s
+  constexpr int kTw360PacketsToKeep = 750;  // enough to find a fresh boundary
+
   while (_run) {
     if (_packageList.Size() <= 0) {
       std::this_thread::sleep_for(std::chrono::nanoseconds(1));
       continue;
     }
 
-    UDPPackage::Ptr packagePtr = _packageList.PopPackage();
+    UDPPackage::Ptr packagePtr;
+    if (_lidarType == LT_TW360 &&
+        _packageList.Size() > kTw360BacklogLimit) {
+      while (_run && _packageList.Size() > kTw360PacketsToKeep) {
+        auto stale = _packageList.PopPackage();
+        if (!stale)
+          break;
+        _packageList.PushFreePackage(stale);
+      }
+
+      // The retained head may be in the middle of a revolution.  Discard it
+      // until the next point-cloud packet whose packet counter is one.
+      while (_run) {
+        auto candidate = _packageList.PopPackage();
+        if (!candidate)
+          break;
+        const bool is_point_packet =
+            candidate->m_length == 1212 || candidate->m_length == 1236 ||
+            candidate->m_length == 1348;
+        const bool is_first_packet =
+            is_point_packet &&
+            TwoHextoInt(candidate->m_szData[6], candidate->m_szData[7]) == 1;
+        if (is_first_packet) {
+          packagePtr = candidate;
+          break;
+        }
+        _packageList.PushFreePackage(candidate);
+      }
+
+      // Do not append the newly aligned revolution to a stale partial cloud.
+      _pointCloudPtr->clear();
+      _period_count = -1;
+      _cur_udp_count = -1;
+      _has_max_count = false;
+      _has_framed_angle = false;
+      _has_framed_cycle_count = false;
+      _validPointsTimes = 0;
+      _udp_count = 0;
+      _frame_time = 0;
+    } else {
+      packagePtr = _packageList.PopPackage();
+    }
 
     if (!packagePtr)
       continue;
 
     if (packagePtr->m_length == 120) {
-      // _packageList.PushFreePackage(packagePtr);
+      // Always recycle ignored packets.  Leaking one preallocated buffer per
+      // packet eventually exhausts the free pool and makes the receive thread
+      // overwrite point-cloud packets that are still waiting to be decoded.
+      _packageList.PushFreePackage(packagePtr);
       continue;
     }
 
@@ -1567,12 +1620,14 @@ bool LidarDevice::PointCloudCallback(TWPointCloud::Points &points,
       setAPDTemp(basic_point, point.apd_temp);
       setPulseCodeInterval(basic_point, point.pulseCodeInterval);
 
-      logger.LogTestPoint(__FILE__, __LINE__, PRETTY_FUNCTION,
-                          "$xyzall,%f,%f,%f,%f,%f,%d,%f,%f,%d,%d,%d,%u,%d",
-                          point.x, point.y, point.z, point.intensity,
-                          point.distance, point.channel, point.angle,
-                          point.pulse, point.echo, point.mirror,
-                          point.left_right, point.t_sec, point.t_usec);
+      if (logger.IsEnabled(LOG_TEST_POINT)) {
+        logger.LogTestPoint(
+            __FILE__, __LINE__, PRETTY_FUNCTION,
+            "$xyzall,%f,%f,%f,%f,%f,%d,%f,%f,%d,%d,%d,%u,%d", point.x,
+            point.y, point.z, point.intensity, point.distance, point.channel,
+            point.angle, point.pulse, point.echo, point.mirror,
+            point.left_right, point.t_sec, point.t_usec);
+      }
       _pointCloudPtr->push_back(std::move(basic_point));
     }
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -1634,12 +1689,14 @@ void LidarDevice::PointCloudCallback(TWPointCloud::Points &points,
       setAPDTemp(basic_point, point.apd_temp);
       setPulseCodeInterval(basic_point, point.pulseCodeInterval);
 
-      logger.LogTestPoint(__FILE__, __LINE__, PRETTY_FUNCTION,
-                          "$xyzall,%f,%f,%f,%f,%f,%d,%f,%f,%d,%d,%d,%u,%d",
-                          point.x, point.y, point.z, point.intensity,
-                          point.distance, point.channel, point.angle,
-                          point.pulse, point.echo, point.mirror,
-                          point.left_right, point.t_sec, point.t_usec);
+      if (logger.IsEnabled(LOG_TEST_POINT)) {
+        logger.LogTestPoint(
+            __FILE__, __LINE__, PRETTY_FUNCTION,
+            "$xyzall,%f,%f,%f,%f,%f,%d,%f,%f,%d,%d,%d,%u,%d", point.x,
+            point.y, point.z, point.intensity, point.distance, point.channel,
+            point.angle, point.pulse, point.echo, point.mirror,
+            point.left_right, point.t_sec, point.t_usec);
+      }
 
       _pointCloudPtr->push_back(std::move(basic_point));
     }

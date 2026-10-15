@@ -89,11 +89,15 @@ def generate_launch_description():
                 'UseLidarClock': False,
                 'CycleCountFrameSplit': False,
 
-                # 时间分帧模式True、扫描分帧模式False
+                # TW360 使用扫描周期/包号分帧；时间窗模式不适用于该型号。
                 'UseTimeWindow': False,
 
+                # TW360 约 5000 UDP 包/秒：关闭可选逐包算法，避免 SDK 解码队列积压。
+                # 坐标解算、距离范围和 ROS 发布不受影响。
+                'EnableLidarAlgo': False,
+
                 # udp ros msg发布
-	            'UseUdpROSmsg': False,
+	            'UseUdpROSmsg': True,
 
                 # 以秒为时间戳单位发布点云
 	            'UsePointTimeSec': True,
@@ -105,7 +109,7 @@ def generate_launch_description():
                 'ImuAccelToMs2': True,
 
 		        'DistanceMin' : 0.0,
-    	        'DistanceMax' : 200.0
+    	        'DistanceMax' : 30.0
                 
                 }],
             output='log'

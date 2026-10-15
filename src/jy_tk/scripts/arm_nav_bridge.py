@@ -10,6 +10,11 @@
 用法：
   ros2 run jy_tk arm_nav_bridge.py
 
+直接触发指定巡检点（不调用机械臂）：
+  curl -X POST http://127.0.0.1:8189/api/trigger_nav \
+    -H 'Content-Type: application/json' \
+    -d '{"point_id":"2"}'
+
 机械臂侧对接：
   机械臂完成动作后，调用：
     curl -X POST http://<jetson_ip>:8189/api/arm_done \
@@ -230,8 +235,20 @@ class ArmNavBridge(Node):
 
         @app.post('/api/trigger_nav')
         async def trigger_nav(req: ArmDoneRequest):
-            """启动巡检，前往第一个点位。"""
-            next_point_id = '1'
+            """启动巡检；可通过 point_id 直接指定目标点位。"""
+            next_point_id = req.point_id.strip() or '1'
+
+            if next_point_id not in bridge.next_point_map:
+                message = f'未知点位 {next_point_id}，未发布导航指令'
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
             msg = String()
             msg.data = next_point_id
             try:
@@ -251,12 +268,13 @@ class ArmNavBridge(Node):
                 }
 
             bridge.get_logger().info(
-                f'  ✅ 已发 {bridge.next_topic}=1，'
-                '导航将前往 1 号点；下一点位=1')
+                f'  ✅ 已发 {bridge.next_topic}={next_point_id}，'
+                f'导航将前往 {next_point_id} 号点；'
+                f'下一点位={next_point_id}')
             return {
                 'status': 'ok',
                 'success': True,
-                'message': '发布成功；下一点位=1',
+                'message': f'发布成功；下一点位={next_point_id}',
                 'next_published': True,
                 'next_point_id': next_point_id,
             }

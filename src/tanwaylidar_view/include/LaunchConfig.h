@@ -83,6 +83,8 @@ public:
 	bool m_cycleCountFrameSplit = false;
 	// 是否使用时间分帧模式
 	bool m_useTimeWindow = false;
+	// 是否启用 SDK 的可选点云算法链。TW360 高包率下逐包处理可能造成长时间积压。
+	bool m_enableLidarAlgo = true;
 
 	//日志系统相关配置
 	std::string m_logFileName = "";

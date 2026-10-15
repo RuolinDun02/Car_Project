@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
+
 project(yhs_can_control)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -19,7 +20,6 @@ find_package(tf2_ros REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(yhs_can_interfaces REQUIRED)
-
 
 add_executable(yhs_can_control_node src/yhs_can_control_node.cpp)
 target_include_directories(yhs_can_control_node PUBLIC

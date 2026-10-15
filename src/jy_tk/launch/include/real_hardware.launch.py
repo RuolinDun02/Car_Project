@@ -6,6 +6,9 @@ use_motor=true  → 启动电机驱动 + EKF
                   同时启动：反光条提取 + 对接控制器
 use_motor=false → 只启动雷达
                   静态 TF 发 odom → base_footprint（恒等变换）
+
+use_vision=true  → 启动反光条提取 + 视觉对接（失败自动回退直线）
+use_vision=false → 不启动反光条提取，对接控制器直接走直线
 """
 
 import os
@@ -17,7 +20,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -31,7 +34,14 @@ def generate_launch_description():
         'use_motor', default_value='true',
         description='true=启动电机驱动+EKF, false=只用雷达（静态TF）'
     )
+    # ★ 新增：use_vision 参数
+    use_vision_arg = DeclareLaunchArgument(
+        'use_vision', default_value='false',
+        description='true=反光条识别对接, false=纯直线对接'
+    )
     use_motor = LaunchConfiguration('use_motor')
+    # ★ 新增：use_vision 变量
+    use_vision = LaunchConfiguration('use_vision')
 
     # ---------- 1) 电机驱动（条件启动）----------
     motor_node = IncludeLaunchDescription(
@@ -106,7 +116,7 @@ def generate_launch_description():
         }],
     )
 
-    # ---------- 7) ★ 反光条直线提取 ----------
+    # ---------- 7) ★ 反光条直线提取（仅 use_motor=true 且 use_vision=true 时启动）----------
     tanway_line_extractor = Node(
         package='tanway_line_extractor',
         executable='tanway_line_extractor_node',
@@ -114,13 +124,24 @@ def generate_launch_description():
         output='screen',
         respawn=True,
         respawn_delay=2.0,
-        condition=IfCondition(use_motor),
+        # ★ use_vision=false 时不启动（省 CPU）
+        condition=IfCondition(
+            PythonExpression([
+                "'", use_motor, "' == 'true' and '",
+                use_vision, "' == 'true'"
+            ])
+        ),
         parameters=[{
             'cloud_topic': '/tanwaylidar_pointcloud',
             'lines_topic': '/tanway_lines',
             'markers_topic': '/tanway_line_markers',
             'frame_id': 'lidar_link',
             'extraction_mode': '3d_cluster',
+            'min_range': 0.20,
+            'max_range': 4.00,
+            'use_angular_roi': True,
+            'roi_frame': 'base_footprint',
+            'roi_half_angle_deg': 45.0,
             'reflective_threshold': 100.0,
             'cluster_eps': 0.08,
             'cluster_min_pts': 15,
@@ -136,7 +157,7 @@ def generate_launch_description():
         }],
     )
 
-    # ---------- 8) ★ 对接控制器 ----------
+    # ---------- 8) ★ 对接控制器（始终启动，内部按 use_vision 分支）----------
     docking_controller = Node(
         package='jy_tk',
         executable='docking_controller.py',
@@ -173,17 +194,21 @@ def generate_launch_description():
             'fallback_dock_distance': 0.7,
             'fallback_timeout': 20.0,
             'control_rate': 20.0,
+            # ★ 新增：传递 use_vision 给 docking_controller
+            'use_vision': use_vision,
         }],
     )
 
     return LaunchDescription([
         use_motor_arg,
+        # ★ 新增：use_vision_arg
+        use_vision_arg,
         motor_node,
         lidar_launch,
         ekf_launch,
         static_odom_tf,
         lidar_frame_tf,
         cmd_vel_bridge,
-        tanway_line_extractor,   # ★ 新增
-        docking_controller,      # ★ 新增
+        tanway_line_extractor,
+        docking_controller,
     ])

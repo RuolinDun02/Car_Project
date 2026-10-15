@@ -4,10 +4,11 @@
 
 流程：
   1. 收到 /docking/request
-  2. 尝试识别反光条（/tanway_lines）
-  3. 若识别到 → 用反光条对准（PID 控制）
-  4. 若识别不到/丢失/超时 → 回退直线对接（用 odom 位移）
-  5. 完成 → 发 /docking/complete
+  2. use_vision=True 时：尝试识别反光条（/tanway_lines）
+     - 若识别到 → 用反光条对准（PID 控制）
+     - 若识别不到/丢失/超时 → 回退直线对接（用 odom 位移）
+  3. use_vision=False 时：直接走直线对接
+  4. 完成 → 发 /docking/complete
 
 接口：
   输入：
@@ -93,6 +94,9 @@ class DockingController(Node):
 
         self.declare_parameter("control_rate", 20.0)
 
+        # ★ 新增：是否启用视觉（反光条）对接
+        self.declare_parameter("use_vision", True)
+
         p = self.get_parameter
         self.lines_topic = p("lines_topic").value
         self.cmd_vel_topic = p("cmd_vel_topic").value
@@ -127,6 +131,9 @@ class DockingController(Node):
         self.fallback_timeout = float(p("fallback_timeout").value)
 
         self.control_rate = float(p("control_rate").value)
+
+        # ★ 新增：读取 use_vision 参数
+        self.use_vision = bool(p("use_vision").value)
 
         # -------- 状态 --------
         self.state = DockingState.IDLE
@@ -169,6 +176,9 @@ class DockingController(Node):
         self.get_logger().info(f"  反光条: {self.lines_topic}")
         self.get_logger().info(f"  速度: {self.cmd_vel_topic}")
         self.get_logger().info(f"  反光条消息可用: {HAS_LINE_MSG}")
+        # ★ 新增：打印 use_vision 状态
+        self.get_logger().info(
+            f"  视觉对接: {'启用' if self.use_vision else '禁用(纯直线)'}")
         self.get_logger().info("=" * 60)
 
     # ================================================================
@@ -183,6 +193,15 @@ class DockingController(Node):
 
         self.get_logger().info(f"收到对接请求: {msg.data}")
         self._publish_zero()
+
+        # ★ 新增：use_vision=False 时直接走直线对接
+        if not self.use_vision:
+            self.get_logger().info(
+                "use_vision=False，直接执行直线对接（不识别反光条）")
+            self._start_fallback()
+            return
+
+        # use_vision=True：走原来的识别流程
         self.wait_start_time = self.get_clock().now()
         self._transition(DockingState.WAIT_LINES)
 

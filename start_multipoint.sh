@@ -57,8 +57,12 @@ export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
 
-# ★ 如果两台机器都用 CycloneDDS，取消下面这行注释（两台必须一致）
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# ★ 改回 FastDDS（FastRTPS）—— 不再使用 CycloneDDS
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+# ★ CycloneDDS 配置已废弃，注释保留备查：
+# export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# export CYCLONEDDS_URI=file://$HOME/.cyclonedds/config.xml
 
 # 打印当前环境（调试用）
 log_info "===== ROS 环境 ====="
@@ -125,18 +129,21 @@ cleanup_stale_processes() {
     # 等内核释放资源
     sleep 3
 
-    # ★ 清理 CycloneDDS 残留（避免 participant 满）
-    log_info "清理 CycloneDDS 残留..."
+    # ★ 清理 CycloneDDS 残留（虽然改用 FastDDS，但残留文件还是清的）
+    log_info "清理 DDS 残留..."
     set +e
     sudo -n rm -f /dev/shm/cyclonedds_* 2>/dev/null
     sudo -n rm -f /dev/shm/*cyclone* 2>/dev/null
     sudo -n rm -f /tmp/cyclonedds_* 2>/dev/null
     sudo -n rm -f /tmp/*cyclone* 2>/dev/null
+    # FastDDS 的残留也清
+    sudo -n rm -f /dev/shm/fastrtps_* 2>/dev/null
+    sudo -n rm -f /dev/shm/sem.fastrtps_* 2>/dev/null
     set -e
-    log_ok "CycloneDDS 残留已清理"
+    log_ok "DDS 残留已清理"
 
-    # ★ 等 participant 超时释放（CycloneDDS 默认 30 秒）
-    log_info "等待 CycloneDDS participant 释放（10 秒）..."
+    # ★ 等 participant 超时释放
+    log_info "等待 DDS participant 释放（10 秒）..."
     sleep 10
 
     # 重启 ROS 2 daemon
@@ -147,7 +154,7 @@ cleanup_stale_processes() {
     set -e
     sleep 2
 
-        # ★ 等 daemon 真正就绪（用 timeout 5 保护）
+    # ★ 等 daemon 真正就绪（用 timeout 5 保护）
     log_info "等待 ROS 2 daemon 就绪..."
     for i in $(seq 1 10); do
         if timeout 3 ros2 daemon status 2>/dev/null | grep -q "running"; then

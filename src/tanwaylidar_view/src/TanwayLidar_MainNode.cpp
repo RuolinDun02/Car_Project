@@ -470,9 +470,27 @@ int main(int argc, char **argv)
 		
 	}
 
-	auto algo = ILidarAlgo::Create((LidarType)launchConfig.m_lidarType, launchConfig.m_AlgoTable);
-
-	lidar->SetLidarAlgo(algo.get());
+	// TW360 每秒约 5000 个 UDP 包。如果可选算法链逐包处理跟不上，
+	// SDK 内部 200000 包队列会在约 40 秒后填满，随后覆盖未解码旧包。
+	// 保留算法对象至 main 退出，并允许对这类高速数据禁用可选滤波。
+	std::unique_ptr<ILidarAlgo> algo;
+	if (launchConfig.m_enableLidarAlgo) {
+		algo = ILidarAlgo::Create(
+			(LidarType)launchConfig.m_lidarType, launchConfig.m_AlgoTable);
+		lidar->SetLidarAlgo(algo.get());
+	#if defined(USE_FOR_ROS2)
+		RCLCPP_INFO(node->get_logger(), "Tanway SDK point-cloud algorithms: enabled");
+	#else
+		ROS_INFO("Tanway SDK point-cloud algorithms: enabled");
+	#endif
+	} else {
+	#if defined(USE_FOR_ROS2)
+		RCLCPP_WARN(node->get_logger(),
+			"Tanway SDK point-cloud algorithms: disabled (raw decoded points)");
+	#else
+		ROS_WARN("Tanway SDK point-cloud algorithms: disabled (raw decoded points)");
+	#endif
+	}
 
 
 	lidar->SetCoreHorAngleOffset(launchConfig.m_coreHorAngleOffsetL, launchConfig.m_coreHorAngleOffsetR);

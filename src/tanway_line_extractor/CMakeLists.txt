@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
+
 project(tanway_line_extractor)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -11,6 +12,8 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -48,6 +51,8 @@ ament_target_dependencies(tanway_line_extractor_node
   std_msgs
   sensor_msgs
   geometry_msgs
+  tf2
+  tf2_ros
   visualization_msgs
 )
 

@@ -23,10 +23,10 @@ multi_point_patrol:
     docked_position_tolerance: 0.5
 
     # 每次节点启动后的第一次导航前执行：后退 → 旋转 360 度 → 等待。
-    initial_backup_distance: 1.0
+    initial_backup_distance: 0.3
     initial_backup_speed: 0.15
     initial_backup_timeout: 10.0
-    initial_spin_speed_deg: 60.0
+    initial_spin_speed_deg: 15.0
     initial_spin_timeout: 60.0
     initial_wait_after_spin: 2.0
 
@@ -39,7 +39,7 @@ multi_point_patrol:
 
     # 前往下一点前，先直线后退。
     undock_speed: 0.10
-    undock_distance: 0.7
+    undock_distance: 0.3
 
     motion_timeout: 120.0
     control_rate: 20.0

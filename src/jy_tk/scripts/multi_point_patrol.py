@@ -41,9 +41,10 @@
        -H 'Content-Type: application/json' \
        -d '{"arm":"BOTH","result":"ok","point_id":"1"}'
 
-  3. 跳过机械臂桥接，直接发布点位 2：
-     ros2 topic pub --once /patrol/next std_msgs/msg/String \
-       "{data: '2'}"
+  3. 跳过机械臂动作，通过 HTTP 直接发布点位 2：
+     curl -X POST http://127.0.0.1:8189/api/trigger_nav \
+       -H 'Content-Type: application/json' \
+       -d '{"point_id":"2"}'
 """
 
 import math
@@ -105,7 +106,7 @@ class MultiPointPatrol(Node):
         self.declare_parameter("docked_position_tolerance", 0.5)
 
         # 节点启动后的第一次导航前，先后退、旋转一周并短暂停稳。
-        self.declare_parameter("initial_backup_distance", 1.0)
+        self.declare_parameter("initial_backup_distance", 0.3)
         self.declare_parameter("initial_backup_speed", 0.15)
         self.declare_parameter("initial_backup_timeout", 10.0)
         self.declare_parameter("initial_spin_speed_deg", 60.0)
@@ -117,7 +118,7 @@ class MultiPointPatrol(Node):
 
         # 离开当前停靠点的直线后退参数。
         self.declare_parameter("undock_speed", 0.10)
-        self.declare_parameter("undock_distance", 0.7)
+        self.declare_parameter("undock_distance", 0.3)
 
         self.declare_parameter("motion_timeout", 20.0)
         # ★ 对接总超时（docking_controller 内部有自己的超时）

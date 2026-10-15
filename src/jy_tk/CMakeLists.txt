@@ -15,8 +15,9 @@ install(PROGRAMS
   scripts/nav_trigger.py
   scripts/motor_watchdog.py
   scripts/multi_point_patrol.py
-  scripts/arm_nav_bridge.py 
+  scripts/arm_nav_bridge.py
   scripts/docking_controller.py
+  scripts/polygon_keepout_mask_server.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

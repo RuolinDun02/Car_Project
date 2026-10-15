@@ -106,6 +106,7 @@ void LaunchConfig::ReadLaunchParams(ros::NodeHandle &nh_private)
 	nh_private.param<bool>("CycleCountFrameSplit", m_cycleCountFrameSplit, false);
 	//时间分帧模式
 	nh_private.param<bool>("UseTimeWindow", m_useTimeWindow, false);
+	nh_private.param<bool>("EnableLidarAlgo", m_enableLidarAlgo, true);
 	
 	nh_private.param<std::string>("LogFileName", m_logFileName, "log_time.log");
 	nh_private.param<std::string>("LogLevel", m_logLevel, "LOG_OFF");
@@ -150,6 +151,7 @@ void LaunchConfig::ReadLaunchParams(const std::shared_ptr<rclcpp::Node> &node)
 	ReadSingleParamsBool(node,"CycleCountFrameSplit", m_cycleCountFrameSplit, false);
 	//时间分帧模式
 	ReadSingleParamsBool(node,"UseTimeWindow", m_useTimeWindow, false);
+	ReadSingleParamsBool(node,"EnableLidarAlgo", m_enableLidarAlgo, true);
 
 
 	ReadSingleParamsString(node, "LogFileName", m_logFileName, "log_time.log");

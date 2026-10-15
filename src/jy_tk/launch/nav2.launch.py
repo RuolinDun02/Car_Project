@@ -13,12 +13,16 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-
+from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('jy_tk')
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
-
+    keepout_params_file = os.path.join(
+        pkg_share,
+        'config',
+        'keepout_polygon.yaml',
+    )
     # ---------- 参数 ----------
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     use_motor = LaunchConfiguration('use_motor', default='true')
@@ -58,13 +62,24 @@ def generate_launch_description():
         }.items(),
     )
 
+
     # Start the hardware, static TF and cloud-to-scan node first.  The
     # converter uses a lazy cloud subscription; bringing it up before Nav2
     # creates its /scan subscribers avoids racing lifecycle transitions.
+    polygon_keepout_server = Node(
+        package='jy_tk',
+        executable='polygon_keepout_mask_server.py',
+        name='polygon_keepout_mask_server',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+        parameters=[keepout_params_file],
+    )
     delayed_nav2_bringup = TimerAction(
         period=5.0,
         actions=[nav2_bringup],
     )
+    
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -86,5 +101,6 @@ def generate_launch_description():
             description='Nav2 参数文件',
         ),
         bringup_launch,
+        polygon_keepout_server,
         delayed_nav2_bringup,
     ])

@@ -17,6 +17,12 @@ tanway_line_extractor:
     ring_min: 0
     ring_max: 47
 
+    # ===== 车体前方扇形 ROI =====
+    # 点先转到 base_footprint，再保留车头正前方 ±45°。
+    use_angular_roi: true
+    roi_frame: "base_footprint"
+    roi_half_angle_deg: 45.0
+
     # ===== 3D 聚类模式参数 =====
     # ★ 关键修复：反光条反射率通常 180~220，用 180 严格过滤
     reflective_threshold: 125.0

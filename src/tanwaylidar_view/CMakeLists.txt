@@ -1,14 +1,10 @@
 cmake_minimum_required(VERSION 3.5)
+
 project(tanwaylidar_view)
 
 add_definitions(-DDEBUG_STRING="")
 add_definitions(-DDEBUG_MODE="false")
 add_definitions(-DVERSION_NUMBER="2.0.6")
-
-if(NOT CMAKE_BUILD_TYPE)
-set(CMAKE_BUILD_TYPE Release)
-endif()
-set(CMAKE_CXX_FLAGS_RELEASE -Ofast)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -O3  -Wall -fPIC")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3  -Wall")
@@ -74,7 +70,6 @@ if(roscpp_FOUND AND ${COMPILE_METHOD} STREQUAL "CATKIN")
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
-
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -290,7 +285,6 @@ install(DIRECTORY
 ## Testing ##
 #############
 
-
 ## Add gtest based cpp test target and link libraries
 # catkin_add_gtest(${PROJECT_NAME}-test test/test_tensorpro_view.cpp)
 # if(TARGET ${PROJECT_NAME}-test)
@@ -391,7 +385,6 @@ if(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")
   #   resource
   #   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   # )
-
 
   install(DIRECTORY rviz
       DESTINATION share/${PROJECT_NAME}

@@ -1,4 +1,0 @@
-[submodule "src/laser_line_extraction"]
-	path = src/laser_line_extraction
-	url = https://github.com/wntdev99/laser_line_extraction.git
-	branch = jazzy

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .title { font: 700 24px sans-serif; fill: #0f172a; }
+      .head { font: 700 16px sans-serif; fill: #0f172a; }
+      .body { font: 14px sans-serif; fill: #334155; }
+      .small { font: 13px sans-serif; fill: #475569; }
+      .box { stroke-width: 2; rx: 12; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1120" height="430" fill="#f8fafc"/>
+  <text x="560" y="38" text-anchor="middle" class="title">TW360 点云约 40 秒后闪烁、只剩部分视场的根因</text>
+
+  <rect x="35" y="80" width="200" height="112" class="box" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="135" y="110" text-anchor="middle" class="head">雷达 UDP 输入</text>
+  <text x="135" y="137" text-anchor="middle" class="body">约 5,000 包/秒</text>
+  <text x="135" y="161" text-anchor="middle" class="body">每圈约 500 包</text>
+  <text x="135" y="183" text-anchor="middle" class="small">抓包连续，网卡/内核无丢包</text>
+
+  <line x1="235" y1="136" x2="292" y2="136" class="arrow"/>
+
+  <rect x="300" y="80" width="220" height="112" class="box" fill="#fef3c7" stroke="#d97706"/>
+  <text x="410" y="110" text-anchor="middle" class="head">SDK 单线程解码</text>
+  <text x="410" y="137" text-anchor="middle" class="body">每个包执行可选算法链</text>
+  <text x="410" y="161" text-anchor="middle" class="body">消费速度低于输入速度</text>
+  <text x="410" y="183" text-anchor="middle" class="small">积压持续增长</text>
+
+  <line x1="520" y1="136" x2="577" y2="136" class="arrow"/>
+
+  <rect x="585" y="70" width="235" height="132" class="box" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="702" y="103" text-anchor="middle" class="head">200,000 包内部队列</text>
+  <text x="702" y="132" text-anchor="middle" class="body">200,000 ÷ 5,000 ≈ 40 秒</text>
+  <text x="702" y="157" text-anchor="middle" class="body">队列满后覆盖未解码旧包</text>
+  <text x="702" y="183" text-anchor="middle" class="small">实测点时间戳滞后 38.5 秒</text>
+
+  <line x1="820" y1="136" x2="877" y2="136" class="arrow"/>
+
+  <rect x="885" y="80" width="200" height="112" class="box" fill="#ede9fe" stroke="#7c3aed"/>
+  <text x="985" y="110" text-anchor="middle" class="head">错误组帧</text>
+  <text x="985" y="137" text-anchor="middle" class="body">旧包与当前包交错</text>
+  <text x="985" y="161" text-anchor="middle" class="body">误判扫描周期切换</text>
+  <text x="985" y="183" text-anchor="middle" class="small">发布 11k–37k 点残帧</text>
+
+  <line x1="985" y1="192" x2="985" y2="250" class="arrow"/>
+  <rect x="790" y="258" width="295" height="108" class="box" fill="#ffe4e6" stroke="#e11d48"/>
+  <text x="937" y="289" text-anchor="middle" class="head">/tanwaylidar_pointcloud 已残缺</text>
+  <text x="937" y="317" text-anchor="middle" class="body">角度只覆盖一个扇区并交替变化</text>
+  <text x="937" y="343" text-anchor="middle" class="body">→ /scan 闪烁、只显示一侧</text>
+
+  <rect x="35" y="258" width="675" height="108" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="372" y="289" text-anchor="middle" class="head">已实施修复</text>
+  <text x="372" y="318" text-anchor="middle" class="body">TW360 关闭可选逐包算法链，使解码吞吐追上输入</text>
+  <text x="372" y="344" text-anchor="middle" class="body">忽略 120 字节包时归还缓冲；UseTimeWindow 保持 false</text>
+
+  <text x="560" y="408" text-anchor="middle" class="small">angle_min / angle_max 固定为 ±π 只是 LaserScan 配置，不能证明输入点云具备 360° 有效点。</text>
+</svg>

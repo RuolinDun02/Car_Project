@@ -76,6 +76,11 @@ TanwayLineExtractor::TanwayLineExtractor()
   cluster_min_pts_       = declare_parameter<int>   ("cluster_min_pts",       15);
   linearity_threshold_   = declare_parameter<double>("linearity_threshold",   8.0);
 
+  /* ---- 车体前方扇形 ROI ---- */
+  use_angular_roi_ = declare_parameter<bool>("use_angular_roi", true);
+  roi_frame_ = declare_parameter<std::string>("roi_frame", "base_footprint");
+  roi_half_angle_deg_ = declare_parameter<double>("roi_half_angle_deg", 45.0);
+
   /* ---- 反光条长度限制 ---- */
   refl_line_min_length_ = declare_parameter<double>("reflective_line_min_length", 0.20);
   refl_line_max_length_ = declare_parameter<double>("reflective_line_max_length", 3.00);
@@ -111,6 +116,7 @@ TanwayLineExtractor::TanwayLineExtractor()
   if (processing_rate_ < 0.0)      processing_rate_ = 0.0;
   if (max_points_per_ring_ < 0)    max_points_per_ring_ = 0;
   if (cloud_queue_size_ < 1)       cloud_queue_size_ = 1;
+  roi_half_angle_deg_ = std::clamp(roi_half_angle_deg_, 1.0, 89.0);
   if (ring_min_ < 0)               ring_min_ = 0;
   if (ring_max_ >= static_cast<int>(MAX_RING)) ring_max_ = static_cast<int>(MAX_RING) - 1;
   if (cluster_eps_ < 0.01)         cluster_eps_ = 0.01;
@@ -138,6 +144,9 @@ TanwayLineExtractor::TanwayLineExtractor()
     cloud_topic_, qos,
     std::bind(&TanwayLineExtractor::cloudCallback, this, std::placeholders::_1));
 
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
   const std::size_t reserve_per_ring = 512;
   for (int r = ring_min_; r <= ring_max_; ++r) {
     ring_pts_[r].reserve(reserve_per_ring);
@@ -150,16 +159,71 @@ TanwayLineExtractor::TanwayLineExtractor()
 
   RCLCPP_INFO(get_logger(),
     "启动: 订阅=%s | 模式=%s | refl_thr=%.1f eps=%.3f "
-    "min_pts=%d linearity_thr=%.1f len=[%.2f,%.2f] z=[%.2f,%.2f]",
+    "min_pts=%d linearity_thr=%.1f len=[%.2f,%.2f] z=[%.2f,%.2f] "
+    "angular_roi=%s frame=%s half_angle=%.1f deg",
     cloud_topic_.c_str(), extraction_mode_.c_str(),
     reflective_threshold_, cluster_eps_, cluster_min_pts_,
     linearity_threshold_,
     refl_line_min_length_, refl_line_max_length_,
-    refl_z_min_, refl_z_max_);
+    refl_z_min_, refl_z_max_,
+    use_angular_roi_ ? "on" : "off", roi_frame_.c_str(), roi_half_angle_deg_);
 
   if (publish_refl_cloud_) {
     RCLCPP_INFO(get_logger(), "高反光点云发布: %s (调试用)",
       refl_cloud_topic_.c_str());
+  }
+}
+
+bool TanwayLineExtractor::getAngularRoiTransform(
+  const sensor_msgs::msg::PointCloud2::SharedPtr & msg,
+  float & cos_yaw, float & sin_yaw, float & tx, float & ty)
+{
+  cos_yaw = 1.0f;
+  sin_yaw = 0.0f;
+  tx = 0.0f;
+  ty = 0.0f;
+
+  if (!use_angular_roi_) return true;
+
+  const std::string source_frame =
+    msg->header.frame_id.empty() ? frame_id_ : msg->header.frame_id;
+  if (source_frame == roi_frame_) return true;
+
+  if (roi_transform_cached_ && source_frame == roi_transform_source_frame_) {
+    cos_yaw = roi_cos_yaw_;
+    sin_yaw = roi_sin_yaw_;
+    tx = roi_tx_;
+    ty = roi_ty_;
+    return true;
+  }
+
+  try {
+    const auto transform = tf_buffer_->lookupTransform(
+      roi_frame_, source_frame, rclcpp::Time(msg->header.stamp),
+      rclcpp::Duration::from_seconds(0.02));
+    const auto & q = transform.transform.rotation;
+    const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+    const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+    const double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+    roi_cos_yaw_ = static_cast<float>(std::cos(yaw));
+    roi_sin_yaw_ = static_cast<float>(std::sin(yaw));
+    roi_tx_ = static_cast<float>(transform.transform.translation.x);
+    roi_ty_ = static_cast<float>(transform.transform.translation.y);
+    roi_transform_source_frame_ = source_frame;
+    roi_transform_cached_ = true;
+
+    cos_yaw = roi_cos_yaw_;
+    sin_yaw = roi_sin_yaw_;
+    tx = roi_tx_;
+    ty = roi_ty_;
+    return true;
+  } catch (const tf2::TransformException & e) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 3000,
+      "前方 ROI 无法获取 %s <- %s 变换: %s",
+      roi_frame_.c_str(), source_frame.c_str(), e.what());
+    return false;
   }
 }
 
@@ -535,6 +599,19 @@ void TanwayLineExtractor::extract3DCluster(
   float min_z_seen = std::numeric_limits<float>::max();
   float max_z_seen = std::numeric_limits<float>::lowest();
   std::size_t total_pts = 0;
+  std::size_t range_passed = 0;
+  std::size_t height_passed = 0;
+  std::size_t roi_passed = 0;
+
+  float roi_cos_yaw = 1.0f;
+  float roi_sin_yaw = 0.0f;
+  float roi_tx = 0.0f;
+  float roi_ty = 0.0f;
+  if (!getAngularRoiTransform(
+      msg, roi_cos_yaw, roi_sin_yaw, roi_tx, roi_ty))
+  {
+    return;
+  }
 
   try {
     sensor_msgs::PointCloud2ConstIterator<float> it_x(*msg, "x");
@@ -547,6 +624,9 @@ void TanwayLineExtractor::extract3DCluster(
     const float refl_thr = static_cast<float>(reflective_threshold_);
     const float z_lo     = static_cast<float>(refl_z_min_);
     const float z_hi     = static_cast<float>(refl_z_max_);
+    constexpr float kPi = 3.14159265358979323846f;
+    const float half_angle_rad = static_cast<float>(roi_half_angle_deg_) * kPi / 180.0f;
+    const float tan_half_angle = std::tan(half_angle_rad);
 
     for (; it_x != it_x.end(); ++it_x, ++it_y, ++it_z, ++it_int) {
       ++total_pts;
@@ -554,18 +634,30 @@ void TanwayLineExtractor::extract3DCluster(
       const float x = *it_x;
       const float y = *it_y;
       const float z = *it_z;
-      const float inten = *it_int;
 
-      if (inten > max_intensity_seen) max_intensity_seen = inten;
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+
       if (z < min_z_seen) min_z_seen = z;
       if (z > max_z_seen) max_z_seen = z;
 
-      if (inten < refl_thr) continue;
-
       const float r2 = x * x + y * y;
       if (r2 < min_r2 || r2 > max_r2) continue;
+      ++range_passed;
 
       if (z < z_lo || z > z_hi) continue;
+      ++height_passed;
+
+      if (use_angular_roi_) {
+        const float base_x = roi_cos_yaw * x - roi_sin_yaw * y + roi_tx;
+        const float base_y = roi_sin_yaw * x + roi_cos_yaw * y + roi_ty;
+        if (base_x <= 0.0f || std::abs(base_y) > base_x * tan_half_angle) continue;
+      }
+      ++roi_passed;
+
+      const float inten = *it_int;
+      if (!std::isfinite(inten)) continue;
+      if (inten > max_intensity_seen) max_intensity_seen = inten;
+      if (inten < refl_thr) continue;
 
       refl_pts.push_back({x, y, z, inten});
     }
@@ -584,12 +676,17 @@ void TanwayLineExtractor::extract3DCluster(
     RCLCPP_INFO(get_logger(),
       "\n========== [诊断帧 %d] ==========\n"
       "点云总点数       = %zu\n"
+      "距离/高度/ROI后  = %zu / %zu / %zu\n"
       "点云最大强度     = %.1f (阈值=%.1f)\n"
       "点云 z 范围      = [%.3f, %.3f] (过滤范围=[%.2f, %.2f])\n"
+      "前方 ROI          = %s, %s ± %.1f deg\n"
       "高反光点数       = %zu (参数 cluster_min_pts=%d)",
       frame_counter, total_pts,
+      range_passed, height_passed, roi_passed,
       max_intensity_seen, reflective_threshold_,
       min_z_seen, max_z_seen, refl_z_min_, refl_z_max_,
+      use_angular_roi_ ? "开启" : "关闭",
+      roi_frame_.c_str(), roi_half_angle_deg_,
       refl_pts.size(), cluster_min_pts_);
   }
 

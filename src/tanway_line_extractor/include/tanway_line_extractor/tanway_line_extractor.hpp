@@ -3,6 +3,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "tanway_line_extractor/msg/line_segment3_d.hpp"
@@ -58,6 +60,10 @@ private:
 
   void configureExtractor(line_extraction::LineExtraction & ex) const;
 
+  bool getAngularRoiTransform(
+    const sensor_msgs::msg::PointCloud2::SharedPtr & msg,
+    float & cos_yaw, float & sin_yaw, float & tx, float & ty);
+
   /** @brief 把高反光点发布为 PointCloud2（调试用） */
   void publishReflectiveCloud(
     const std::vector<Point3D> & pts,
@@ -80,6 +86,11 @@ private:
   int    max_intensity_{1000};
   int    ring_min_{1};
   int    ring_max_{48};
+
+  /* ===== 车体前方扇形 ROI ===== */
+  bool        use_angular_roi_{true};
+  std::string roi_frame_{"base_footprint"};
+  double      roi_half_angle_deg_{45.0};
 
   /* ===== 3D 聚类模式参数 ===== */
   double reflective_threshold_{180.0};
@@ -133,6 +144,16 @@ private:
   rclcpp::Publisher<msg::LineSegment3DArray>::SharedPtr lines_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr refl_cloud_pub_;
+
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
+  bool roi_transform_cached_{false};
+  std::string roi_transform_source_frame_;
+  float roi_cos_yaw_{1.0f};
+  float roi_sin_yaw_{0.0f};
+  float roi_tx_{0.0f};
+  float roi_ty_{0.0f};
 
   line_extraction::LineExtraction extractor_;
 };
