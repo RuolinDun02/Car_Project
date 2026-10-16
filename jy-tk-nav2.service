@@ -16,11 +16,8 @@ ExecStart=/home/jiayi/Car_Project/start_multipoint.sh
 # ★ 关键：停止和超时
 KillSignal=SIGINT
 KillMode=control-group
-TimeoutStopSec=15s
+TimeoutStopSec=35s
 SendSIGKILL=yes
-
-# ★ 启动前等待网络
-After=network-online.target
 
 Restart=always
 RestartSec=30
@@ -32,7 +29,7 @@ MemoryHigh=3G
 Environment="HOME=/home/jiayi"
 Environment="USER=jiayi"
 Environment="ROS_DOMAIN_ID=0"                          
-Environment="RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"    
+Environment="RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
 Environment=RCUTILS_COLORIZED_OUTPUT=0
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 

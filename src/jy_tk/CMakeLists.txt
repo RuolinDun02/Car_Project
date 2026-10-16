@@ -18,6 +18,7 @@ install(PROGRAMS
   scripts/arm_nav_bridge.py
   scripts/docking_controller.py
   scripts/polygon_keepout_mask_server.py
+  scripts/stuck_escape_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

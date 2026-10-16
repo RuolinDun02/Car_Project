@@ -3,7 +3,7 @@
 导航 ↔ 机械臂 双向桥接
 
 功能：
-  1. 订阅 /patrol/arrived，收到后 HTTP 调 8188 触发机械臂
+  1. 订阅 /patrol/arrived，默认只记录到位，不自动触发机械臂
   2. 监听 8189 端口，收到 /api/arm_done 后发布下一点
   3. 固定巡检顺序为 1 → 2 → 结束
 
@@ -54,7 +54,7 @@ class ArmNavBridge(Node):
         self.declare_parameter('next_topic', '/patrol/next')
         self.declare_parameter('http_port', 8189)
         self.declare_parameter('arm_speed', 12.0)
-        self.declare_parameter('trigger_arm_on_arrive', True)
+        self.declare_parameter('trigger_arm_on_arrive', False)
 
         p = self.get_parameter
         self.arm_api_base = p('arm_api_base').value.rstrip('/')

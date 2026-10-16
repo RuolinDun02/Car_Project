@@ -34,13 +34,11 @@ def generate_launch_description():
         'use_motor', default_value='true',
         description='true=启动电机驱动+EKF, false=只用雷达（静态TF）'
     )
-    # ★ 新增：use_vision 参数
     use_vision_arg = DeclareLaunchArgument(
         'use_vision', default_value='false',
         description='true=反光条识别对接, false=纯直线对接'
     )
     use_motor = LaunchConfiguration('use_motor')
-    # ★ 新增：use_vision 变量
     use_vision = LaunchConfiguration('use_vision')
 
     # ---------- 1) 电机驱动（条件启动）----------
@@ -70,19 +68,20 @@ def generate_launch_description():
     )
 
     # ---------- 4) 静态 TF：odom → base_footprint ----------
-    static_odom_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_odom_to_base_footprint',
-        output='screen',
-        arguments=[
-            '--x', '0', '--y', '0', '--z', '0',
-            '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
-            '--frame-id', 'odom',
-            '--child-frame-id', 'base_footprint',
-        ],
-        condition=UnlessCondition(use_motor),
-    )
+    # （use_motor=true 时 EKF 发这个 TF，不用静态；use_motor=false 才需要）
+    # static_odom_tf = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     name='static_odom_to_base_footprint',
+    #     output='screen',
+    #     arguments=[
+    #         '--x', '0', '--y', '0', '--z', '0',
+    #         '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
+    #         '--frame-id', 'odom',
+    #         '--child-frame-id', 'base_footprint',
+    #     ],
+    #     condition=UnlessCondition(use_motor),
+    # )
 
     # ---------- 5) 静态 TF：lidar_link → TanwayTP ----------
     lidar_frame_tf = Node(
@@ -116,7 +115,7 @@ def generate_launch_description():
         }],
     )
 
-    # ---------- 7) ★ 反光条直线提取（仅 use_motor=true 且 use_vision=true 时启动）----------
+    # ---------- 7) 反光条直线提取（仅 use_motor=true 且 use_vision=true 时启动）----------
     tanway_line_extractor = Node(
         package='tanway_line_extractor',
         executable='tanway_line_extractor_node',
@@ -124,7 +123,6 @@ def generate_launch_description():
         output='screen',
         respawn=True,
         respawn_delay=2.0,
-        # ★ use_vision=false 时不启动（省 CPU）
         condition=IfCondition(
             PythonExpression([
                 "'", use_motor, "' == 'true' and '",
@@ -157,7 +155,7 @@ def generate_launch_description():
         }],
     )
 
-    # ---------- 8) ★ 对接控制器（始终启动，内部按 use_vision 分支）----------
+    # ---------- 8) 对接控制器（始终启动，内部按 use_vision 分支）----------
     docking_controller = Node(
         package='jy_tk',
         executable='docking_controller.py',
@@ -194,21 +192,57 @@ def generate_launch_description():
             'fallback_dock_distance': 0.7,
             'fallback_timeout': 20.0,
             'control_rate': 20.0,
-            # ★ 新增：传递 use_vision 给 docking_controller
             'use_vision': use_vision,
+        }],
+    )
+
+    # ---------- 9) BT 串行调用的脱困 Action Server ----------
+    # BT 第一次控制恢复失败后才调用；节点不抢占 FollowPath。
+    # 脱困结束后由 BT 使用原 goal / 原 path 继续导航。
+    stuck_escape_node = Node(
+        package='jy_tk',
+        executable='stuck_escape_node.py',
+        name='stuck_escape_node',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+        parameters=[{
+            'enable': True,
+            'action_name': 'stuck_escape',
+            'costmap_topic': '/local_costmap/costmap',
+            'plan_topic': '/plan',
+            # 进入 velocity_smoother，最终仍由 /cmd_vel_smoothed 驱动底盘。
+            'cmd_vel_topic': '/cmd_vel_nav',
+            'robot_frame': 'base_footprint',
+            'global_clear_service':
+                '/global_costmap/clear_around_global_costmap',
+            'escape_cost_threshold': 80,
+            'safe_cost_threshold': 30,
+            'scan_radius': 0.8,
+            'scan_angles': 24,
+            'robot_radius': 0.35,
+            'escape_speed': 0.08,
+            'rotate_speed': 0.18,
+            'heading_tolerance': 0.25,
+            'min_escape_distance': 0.15,
+            'escape_duration_max': 5.0,
+            'retry_wait_time': 1.0,
+            'global_refresh_wait': 1.2,
+            'path_bias_weight': 20.0,
+            'path_lookahead': 0.6,
         }],
     )
 
     return LaunchDescription([
         use_motor_arg,
-        # ★ 新增：use_vision_arg
         use_vision_arg,
         motor_node,
         lidar_launch,
         ekf_launch,
-        static_odom_tf,
+        # static_odom_tf,
         lidar_frame_tf,
         cmd_vel_bridge,
         tanway_line_extractor,
         docking_controller,
+        stuck_escape_node,      # ★ 新增
     ])

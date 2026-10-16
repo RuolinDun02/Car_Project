@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# 防止 systemd 与手工运行脚本时启动两套 ROS 节点。文件描述符随进程
+# 退出自动释放，因此即使脚本被 SIGKILL，也不会留下“死锁”。
+exec 9>/tmp/jy-tk-nav2.lock
+if ! flock -n 9; then
+    echo "jy-tk-nav2 已经在运行，拒绝重复启动" >&2
+    exit 1
+fi
+
 # ============================================================
 # 颜色定义
 # ============================================================
@@ -95,6 +103,7 @@ NAV2_PID=""
 FOXGLOVE_PID=""
 PATROL_PID=""
 ARM_BRIDGE_PID=""
+CLEANUP_STARTED=0
 
 # ============================================================
 # ★ 工具函数
@@ -120,38 +129,27 @@ cleanup_stale_processes() {
     pkill -9 -f "bt_navigator" 2>/dev/null
     pkill -9 -f "map_server" 2>/dev/null
     pkill -9 -f "behavior_server" 2>/dev/null
+    pkill -9 -f "smoother_server" 2>/dev/null
+    pkill -9 -f "waypoint_follower" 2>/dev/null
     pkill -9 -f "velocity_smoother" 2>/dev/null
+    pkill -9 -f "ekf_node" 2>/dev/null
+    pkill -9 -f "robot_state_publisher" 2>/dev/null
+    pkill -9 -f "pointcloud_to_laserscan_node" 2>/dev/null
+    pkill -9 -f "static_transform_publisher" 2>/dev/null
     pkill -9 -f "yhs_can_control" 2>/dev/null
     pkill -9 -f "TanwayLidar" 2>/dev/null
     pkill -9 -f "cmd_vel_to_ctrl_cmd_bridge" 2>/dev/null
+    pkill -9 -f "docking_controller.py" 2>/dev/null
+    pkill -9 -f "polygon_keepout_mask_server.py" 2>/dev/null
     set -e
 
     # 等内核释放资源
     sleep 3
 
-    # ★ 清理 CycloneDDS 残留（虽然改用 FastDDS，但残留文件还是清的）
-    log_info "清理 DDS 残留..."
-    set +e
-    sudo -n rm -f /dev/shm/cyclonedds_* 2>/dev/null
-    sudo -n rm -f /dev/shm/*cyclone* 2>/dev/null
-    sudo -n rm -f /tmp/cyclonedds_* 2>/dev/null
-    sudo -n rm -f /tmp/*cyclone* 2>/dev/null
-    # FastDDS 的残留也清
-    sudo -n rm -f /dev/shm/fastrtps_* 2>/dev/null
-    sudo -n rm -f /dev/shm/sem.fastrtps_* 2>/dev/null
-    set -e
-    log_ok "DDS 残留已清理"
+    clean_dds_state
 
-    # ★ 等 participant 超时释放
-    log_info "等待 DDS participant 释放（10 秒）..."
-    sleep 10
-
-    # 重启 ROS 2 daemon
-    set +e
-    ros2 daemon stop 2>/dev/null
-    sleep 1
-    ros2 daemon start 2>/dev/null
-    set -e
+    # 启动阶段需要 daemon；退出阶段不会再次启动它。
+    ros2 daemon start >/dev/null 2>&1 || true
     sleep 2
 
     # ★ 等 daemon 真正就绪（用 timeout 5 保护）
@@ -242,6 +240,141 @@ check_pid_alive() {
     local pid=$1
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
+
+# ---------- 进程组与 DDS 清理 ----------
+# ros2 launch 会再创建许多子进程，只向 launch PID 发信号可能遗留孤儿节点。
+# 下面所有启动命令都通过 setsid 成为独立进程组，退出时按整组发送信号。
+process_group_alive() {
+    local pid=${1:-}
+    [ -n "$pid" ] && kill -0 -- "-$pid" 2>/dev/null
+}
+
+signal_process_group() {
+    local signal=$1
+    local pid=${2:-}
+    [ -z "$pid" ] && return 0
+
+    if process_group_alive "$pid"; then
+        kill -s "$signal" -- "-$pid" 2>/dev/null || true
+    elif check_pid_alive "$pid"; then
+        kill -s "$signal" "$pid" 2>/dev/null || true
+    fi
+}
+
+wait_for_process_group() {
+    local pid=${1:-}
+    local timeout=${2:-5}
+    local deadline=$((SECONDS + timeout))
+    [ -z "$pid" ] && return 0
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! process_group_alive "$pid" && ! check_pid_alive "$pid"; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    ! process_group_alive "$pid" && ! check_pid_alive "$pid"
+}
+
+stop_process_group() {
+    local pid=${1:-}
+    [ -z "$pid" ] && return 0
+
+    signal_process_group INT "$pid"
+    wait_for_process_group "$pid" 3 && return 0
+    signal_process_group TERM "$pid"
+    wait_for_process_group "$pid" 2 && return 0
+    signal_process_group KILL "$pid"
+    wait_for_process_group "$pid" 1 || true
+}
+
+all_process_groups_stopped() {
+    local pid
+    for pid in "$ARM_BRIDGE_PID" "$PATROL_PID" "$FOXGLOVE_PID" "$NAV2_PID"; do
+        if process_group_alive "$pid" || check_pid_alive "$pid"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+wait_for_process_groups() {
+    local timeout=${1:-10}
+    local deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        all_process_groups_stopped && return 0
+        sleep 0.2
+    done
+    all_process_groups_stopped
+}
+
+signal_all_process_groups() {
+    local signal=$1
+    local pid
+    for pid in "$ARM_BRIDGE_PID" "$PATROL_PID" "$FOXGLOVE_PID" "$NAV2_PID"; do
+        signal_process_group "$signal" "$pid"
+    done
+}
+
+clean_dds_state() {
+    log_info "停止 ROS 2 daemon 并清理 Fast DDS 僵尸共享内存..."
+    timeout 3 ros2 daemon stop >/dev/null 2>&1 || true
+    sleep 1
+
+    # fastdds shm clean 只清理 zombie 文件，比直接 rm /dev/shm/fastrtps_*
+    # 安全；直接删除可能破坏本机仍在运行的其他 DDS participant。
+    if command -v fastdds >/dev/null 2>&1; then
+        timeout 5 fastdds shm clean >/dev/null 2>&1 || true
+    fi
+    log_ok "ROS daemon/DDS 清理完成"
+}
+
+cleanup() {
+    local exit_code=$?
+
+    # EXIT、SIGINT、SIGTERM 可能连续触发，确保只执行一次。
+    if [ "$CLEANUP_STARTED" -eq 1 ]; then
+        return "$exit_code"
+    fi
+    CLEANUP_STARTED=1
+    trap - INT TERM EXIT
+    set +e
+
+    echo ""
+    log_info "收到退出信号，停止所有节点..."
+
+    # 在关闭控制链之前先发零速度；即使 DDS 已异常，后续底盘桥接自身的
+    # cmd_timeout 仍会负责归零。
+    timeout 2 ros2 topic pub --once /cmd_vel_smoothed geometry_msgs/msg/Twist \
+        "{linear: {x: 0.0}, angular: {z: 0.0}}" >/dev/null 2>&1 || true
+
+    signal_all_process_groups INT
+    if ! wait_for_process_groups 12; then
+        log_warn "部分节点未响应 SIGINT，升级为 SIGTERM"
+        signal_all_process_groups TERM
+        wait_for_process_groups 4 || true
+    fi
+    if ! all_process_groups_stopped; then
+        log_warn "部分节点仍未退出，最后使用 SIGKILL"
+        signal_all_process_groups KILL
+        wait_for_process_groups 2 || true
+    fi
+
+    # 回收后台任务，避免 shell 留下僵尸子进程。
+    local pid
+    for pid in "$ARM_BRIDGE_PID" "$PATROL_PID" "$FOXGLOVE_PID" "$NAV2_PID"; do
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
+
+    clean_dds_state
+    log_info "全部停止"
+    return "$exit_code"
+}
+
+# 必须在启动任何 ROS 节点之前安装 trap，启动过程中 Ctrl+C 也能清理。
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap cleanup EXIT
 
 # ============================================================
 # 检查函数（诊断用）
@@ -421,18 +554,14 @@ fi
 log_section "阶段 2/6：启动 Nav2（含硬件层）"
 
 start_nav2() {
-    if check_pid_alive "$NAV2_PID"; then
+    if process_group_alive "$NAV2_PID" || check_pid_alive "$NAV2_PID"; then
         log_warn "上次 Nav2 进程还在，先停"
-        kill -INT "$NAV2_PID" 2>/dev/null || true
-        sleep 3
+        stop_process_group "$NAV2_PID"
     fi
-    set +e
-    pkill -9 -f "nav2.launch.py" 2>/dev/null
-    set -e
     sleep 2
 
     log_info "启动 nav2.launch.py..."
-    ros2 launch jy_tk nav2.launch.py \
+    setsid ros2 launch jy_tk nav2.launch.py \
         use_sim_time:=false use_motor:=true \
         > "$LOG_DIR/nav2.log" 2>&1 &
     NAV2_PID=$!
@@ -477,17 +606,13 @@ fi
 log_section "阶段 3/6：启动 Foxglove Bridge"
 
 start_foxglove() {
-    if check_pid_alive "$FOXGLOVE_PID"; then
-        kill -INT "$FOXGLOVE_PID" 2>/dev/null || true
-        sleep 2
+    if process_group_alive "$FOXGLOVE_PID" || check_pid_alive "$FOXGLOVE_PID"; then
+        stop_process_group "$FOXGLOVE_PID"
     fi
-    set +e
-    pkill -9 -f "foxglove_bridge" 2>/dev/null
-    set -e
     sleep 1
 
     log_info "启动 foxglove_bridge..."
-    ros2 launch foxglove_bridge foxglove_bridge_launch.xml \
+    setsid ros2 launch foxglove_bridge foxglove_bridge_launch.xml \
         > "$LOG_DIR/foxglove.log" 2>&1 &
     FOXGLOVE_PID=$!
     log_info "Foxglove PID=$FOXGLOVE_PID"
@@ -519,17 +644,13 @@ fi
 log_section "阶段 4/6：启动 multi_point_patrol"
 
 start_multi_point_patrol() {
-    if check_pid_alive "$PATROL_PID"; then
-        kill -INT "$PATROL_PID" 2>/dev/null || true
-        sleep 2
+    if process_group_alive "$PATROL_PID" || check_pid_alive "$PATROL_PID"; then
+        stop_process_group "$PATROL_PID"
     fi
-    set +e
-    pkill -9 -f "multi_point_patrol" 2>/dev/null
-    set -e
     sleep 1
 
     log_info "启动 multi_point_patrol.launch.py..."
-    ros2 launch jy_tk multi_point_patrol.launch.py \
+    setsid ros2 launch jy_tk multi_point_patrol.launch.py \
         > "$LOG_DIR/multi_point_patrol.log" 2>&1 &
     PATROL_PID=$!
     log_info "multi_point_patrol PID=$PATROL_PID"
@@ -561,17 +682,13 @@ fi
 log_section "阶段 5/6：启动 arm_nav_bridge"
 
 start_arm_bridge() {
-    if check_pid_alive "$ARM_BRIDGE_PID"; then
-        kill -INT "$ARM_BRIDGE_PID" 2>/dev/null || true
-        sleep 2
+    if process_group_alive "$ARM_BRIDGE_PID" || check_pid_alive "$ARM_BRIDGE_PID"; then
+        stop_process_group "$ARM_BRIDGE_PID"
     fi
-    set +e
-    pkill -9 -f "arm_nav_bridge" 2>/dev/null
-    set -e
     sleep 1
 
     log_info "启动 arm_nav_bridge.py..."
-    ros2 run jy_tk arm_nav_bridge.py \
+    setsid ros2 run jy_tk arm_nav_bridge.py \
         > "$LOG_DIR/arm_bridge.log" 2>&1 &
     ARM_BRIDGE_PID=$!
     log_info "arm_nav_bridge PID=$ARM_BRIDGE_PID"
@@ -712,34 +829,6 @@ echo ""
 echo -e "${BOLD}${BLUE}============================================================${NC}"
 
 set -e
-
-# ============================================================
-# 优雅退出
-# ============================================================
-cleanup() {
-    echo ""
-    log_info "收到退出信号，停止所有节点..."
-
-    check_pid_alive "$ARM_BRIDGE_PID" && kill -INT "$ARM_BRIDGE_PID" 2>/dev/null || true
-    check_pid_alive "$PATROL_PID"     && kill -INT "$PATROL_PID"     2>/dev/null || true
-    check_pid_alive "$FOXGLOVE_PID"   && kill -INT "$FOXGLOVE_PID"   2>/dev/null || true
-    check_pid_alive "$NAV2_PID"       && kill -INT "$NAV2_PID"       2>/dev/null || true
-
-    sleep 10
-
-    set +e
-    pkill -9 -f "arm_nav_bridge" 2>/dev/null
-    pkill -9 -f "nav2.launch.py" 2>/dev/null
-    pkill -9 -f "foxglove_bridge" 2>/dev/null
-    pkill -9 -f "multi_point_patrol" 2>/dev/null
-    pkill -9 -f "lifecycle_manager" 2>/dev/null
-    pkill -9 -f "yhs_can_control" 2>/dev/null
-    pkill -9 -f "TanwayLidar" 2>/dev/null
-    set -e
-
-    log_info "全部停止"
-}
-trap cleanup SIGINT SIGTERM
 
 # ============================================================
 # 等待
