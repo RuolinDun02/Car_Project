@@ -2,21 +2,23 @@
 <!--
   保留原始路径的 NavigateToPose 行为树（Jazzy / BT.CPP 4）。
 
-  1. 每个目标只执行一次 ComputePathToPose，避免脱困后改写原始巡视路径。
-  2. FollowPath 第一次失败：清 local costmap，然后用原 path 重试。
-  3. 再次发生可恢复控制错误：调用 stuck_escape action；完成后继续原 path。
-  4. 起点占用/无有效路径等可恢复规划错误：调用 stuck_escape 清理机器人
-     周围的全局动态区域并按需要移动，然后使用行为树内同一个 goal 重试规划。
-
-  两个外层 RecoveryNode 使用很大的重试次数，使可恢复的规划/虚拟碰撞问题
-  保持 NavigateToPose 为 RUNNING，而不是很快向巡检节点返回 STATUS_ABORTED(6)。
-  不可恢复错误仍由 WouldA*RecoveryHelp 返回 FAILURE 并终止任务。
+  修改版：
+  1. 起步规划：ComputePathToPose 只执行一次，生成初始 {path}。
+  2. FollowPath 失败：清 local costmap，然后用原 path 重试。
+  3. 内层清 local 一次仍失败：
+     - 清 local + 清 global costmap；
+     - 等待 1 秒；
+     - 重新执行 ComputePathToPose，更新 {path}；
+     - 再由外层 RecoveryNode 用新 path 重试 FollowPath。
+  4. 不调用 stuck_escape / Spin / BackUp。
+  5. 两个 RecoveryNode 使用很大的重试次数，使可恢复的规划/虚拟碰撞问题
+     保持 NavigateToPose 为 RUNNING，而不是很快向巡检节点返回 STATUS_ABORTED(6)。
 -->
 <root main_tree_to_execute="MainTree" BTCPP_format="4">
   <BehaviorTree ID="MainTree">
     <Sequence name="NavigatePreservingOriginalPath">
 
-      <!-- 起步规划：复用原 goal，不重新发布 NavigateToPose。 -->
+      <!-- 起步规划：只规划一次，生成初始 {path} -->
       <RecoveryNode number_of_retries="1000000" name="ComputeOriginalPath">
         <ComputePathToPose
           goal="{goal}"
@@ -24,40 +26,43 @@
           planner_id="GridBased"
           error_code_id="{compute_path_error_code}"/>
         <Sequence name="RecoverStartPlanning">
-          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
-          <AssistedTeleop
-            server_name="stuck_escape"
-            time_allowance="0.0"
-            is_recovery="true"
-            error_code_id="{stuck_escape_error_code}"/>
+          <ClearEntireCostmap
+            name="ClearLocalCostmapPlanning"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap
+            name="ClearGlobalCostmapPlanning"
+            service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait wait_duration="1.0"/>
         </Sequence>
       </RecoveryNode>
 
-      <!--
-        外层负责物理脱困；内层保证每轮总是先执行一次 Nav2 常规 local clear。
-        两层重试都继续使用上面生成的同一个 {path}。
-      -->
-      <RecoveryNode number_of_retries="1000000" name="FollowOriginalPathWithEscape">
+      <!-- 跟踪路径：失败后依次清图、重新规划、再跟踪 -->
+      <RecoveryNode number_of_retries="1000000" name="FollowOriginalPathWithClear">
         <RecoveryNode number_of_retries="1" name="FirstLocalRecovery">
           <FollowPath
             path="{path}"
             controller_id="FollowPath"
             error_code_id="{follow_path_error_code}"/>
-          <Sequence name="ClearLocalOnce">
-            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
-            <ClearEntireCostmap
-              name="ClearLocalCostmap"
-              service_name="local_costmap/clear_entirely_local_costmap"/>
-          </Sequence>
+          <ClearEntireCostmap
+            name="ClearLocalCostmapFollowing"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
         </RecoveryNode>
 
-        <Sequence name="PhysicalEscape">
-          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
-          <AssistedTeleop
-            server_name="stuck_escape"
-            time_allowance="0.0"
-            is_recovery="true"
-            error_code_id="{stuck_escape_error_code}"/>
+        <Sequence name="DeeperRecovery">
+          <!-- 清 local + 清 global -->
+          <ClearEntireCostmap
+            name="ClearLocalCostmapDeeper"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap
+            name="ClearGlobalCostmapDeeper"
+            service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait wait_duration="1.0"/>
+          <!-- ★ 重新规划：更新 {path}，外层 RecoveryNode 将用新 path 重试 FollowPath -->
+          <ComputePathToPose
+            goal="{goal}"
+            path="{path}"
+            planner_id="GridBased"
+            error_code_id="{compute_path_error_code}"/>
         </Sequence>
       </RecoveryNode>
 

@@ -199,39 +199,39 @@ def generate_launch_description():
     # ---------- 9) BT 串行调用的脱困 Action Server ----------
     # BT 第一次控制恢复失败后才调用；节点不抢占 FollowPath。
     # 脱困结束后由 BT 使用原 goal / 原 path 继续导航。
-    stuck_escape_node = Node(
-        package='jy_tk',
-        executable='stuck_escape_node.py',
-        name='stuck_escape_node',
-        output='screen',
-        respawn=True,
-        respawn_delay=2.0,
-        parameters=[{
-            'enable': True,
-            'action_name': 'stuck_escape',
-            'costmap_topic': '/local_costmap/costmap',
-            'plan_topic': '/plan',
-            # 进入 velocity_smoother，最终仍由 /cmd_vel_smoothed 驱动底盘。
-            'cmd_vel_topic': '/cmd_vel_nav',
-            'robot_frame': 'base_footprint',
-            'global_clear_service':
-                '/global_costmap/clear_around_global_costmap',
-            'escape_cost_threshold': 80,
-            'safe_cost_threshold': 30,
-            'scan_radius': 0.8,
-            'scan_angles': 24,
-            'robot_radius': 0.35,
-            'escape_speed': 0.08,
-            'rotate_speed': 0.18,
-            'heading_tolerance': 0.25,
-            'min_escape_distance': 0.15,
-            'escape_duration_max': 5.0,
-            'retry_wait_time': 1.0,
-            'global_refresh_wait': 1.2,
-            'path_bias_weight': 20.0,
-            'path_lookahead': 0.6,
-        }],
-    )
+    # stuck_escape_node = Node(
+    #     package='jy_tk',
+    #     executable='stuck_escape_node.py',
+    #     name='stuck_escape_node',
+    #     output='screen',
+    #     respawn=True,
+    #     respawn_delay=2.0,
+    #     parameters=[{
+    #         'enable': True,
+    #         'action_name': 'stuck_escape',
+    #         'costmap_topic': '/local_costmap/costmap',
+    #         'plan_topic': '/plan',
+    #         # 进入 velocity_smoother，最终仍由 /cmd_vel_smoothed 驱动底盘。
+    #         'cmd_vel_topic': '/cmd_vel_nav',
+    #         'robot_frame': 'base_footprint',
+    #         'global_clear_service':
+    #             '/global_costmap/clear_around_global_costmap',
+    #         'escape_cost_threshold': 80,
+    #         'safe_cost_threshold': 30,
+    #         'scan_radius': 0.8,
+    #         'scan_angles': 24,
+    #         'robot_radius': 0.35,
+    #         'escape_speed': 0.08,
+    #         'rotate_speed': 0.18,
+    #         'heading_tolerance': 0.25,
+    #         'min_escape_distance': 0.15,
+    #         'escape_duration_max': 5.0,
+    #         'retry_wait_time': 1.0,
+    #         'global_refresh_wait': 1.2,
+    #         'path_bias_weight': 20.0,
+    #         'path_lookahead': 0.6,
+    #     }],
+    # )
 
     return LaunchDescription([
         use_motor_arg,
@@ -244,5 +244,5 @@ def generate_launch_description():
         cmd_vel_bridge,
         tanway_line_extractor,
         docking_controller,
-        stuck_escape_node,      # ★ 新增
+        # stuck_escape_node,      # ★ 新增
     ])

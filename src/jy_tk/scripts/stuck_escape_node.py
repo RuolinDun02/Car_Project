@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """由 Nav2 BT 调用的脱困 Action Server。
 
+核心改动：
+  同时检查 local_costmap 和 global_costmap。
+  只有当两者都显示机器人位置可通行时，才返回 SUCCESS。
+  这保证了 stuck_escape 的成功条件与 planner_server 判断标准一致，
+  避免出现 "stuck_escape 秒 SUCCESS → planner 秒 FAILED" 的死循环。
+
 published costmap 是只读输出，向它发布 OccupancyGrid 不能修改 planner_server
-内部地图。因此“用局部实时图覆盖全局局部区域”采用 Nav2 支持的等价实现：
+内部地图。因此"用局部实时图覆盖全局局部区域"采用 Nav2 支持的等价实现：
 按 local costmap 窗口大小清除 global costmap 的可重置层，再等待订阅同一
 /scan 的 global obstacle_layer 重新填充真实障碍。static/keepout 会保留或重建。
 
@@ -40,8 +46,12 @@ class StuckEscapeNode(Node):
 
         self.declare_parameter("enable", True)
         self.declare_parameter("action_name", "stuck_escape")
+
+        # ===== costmap 订阅 =====
         self.declare_parameter("costmap_topic", "/local_costmap/costmap")
+        self.declare_parameter("global_costmap_topic", "/global_costmap/costmap")
         self.declare_parameter("plan_topic", "/plan")
+
         # 发给 velocity_smoother 输入，不绕过平滑器。
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("robot_frame", "base_footprint")
@@ -49,8 +59,14 @@ class StuckEscapeNode(Node):
             "global_clear_service",
             "/global_costmap/clear_around_global_costmap",
         )
+
+        # ===== cost 阈值 =====
         self.declare_parameter("escape_cost_threshold", 80)
         self.declare_parameter("safe_cost_threshold", 30)
+        # global costmap 因为 inflation 更大，单独用一个更宽松的阈值
+        self.declare_parameter("global_escape_cost_threshold", 100)
+
+        # ===== 方向选择 =====
         self.declare_parameter("scan_radius", 0.8)
         self.declare_parameter("scan_angles", 24)
         self.declare_parameter("robot_radius", 0.35)
@@ -60,8 +76,11 @@ class StuckEscapeNode(Node):
         self.declare_parameter("min_escape_distance", 0.15)
         self.declare_parameter("escape_duration_max", 5.0)
         self.declare_parameter("retry_wait_time", 1.0)
+
         # global costmap 当前为 1 Hz，至少等待一次新 scan 被融合。
         self.declare_parameter("global_refresh_wait", 1.2)
+
+        # ===== 路径偏好 =====
         self.declare_parameter("path_bias_weight", 20.0)
         self.declare_parameter("path_lookahead", 0.6)
 
@@ -69,12 +88,17 @@ class StuckEscapeNode(Node):
         self.enable = bool(p("enable").value)
         self.action_name = str(p("action_name").value)
         self.costmap_topic = str(p("costmap_topic").value)
+        self.global_costmap_topic = str(p("global_costmap_topic").value)
         self.plan_topic = str(p("plan_topic").value)
         self.cmd_vel_topic = str(p("cmd_vel_topic").value)
         self.robot_frame = str(p("robot_frame").value)
         self.global_clear_service = str(p("global_clear_service").value)
+
         self.escape_cost_thr = int(p("escape_cost_threshold").value)
         self.safe_cost_thr = int(p("safe_cost_threshold").value)
+        self.global_escape_cost_thr = int(
+            p("global_escape_cost_threshold").value)
+
         self.scan_radius = float(p("scan_radius").value)
         self.scan_angles = int(p("scan_angles").value)
         self.robot_radius = float(p("robot_radius").value)
@@ -88,7 +112,9 @@ class StuckEscapeNode(Node):
         self.path_bias_weight = float(p("path_bias_weight").value)
         self.path_lookahead = float(p("path_lookahead").value)
 
+        # ===== 状态 =====
         self.costmap = None
+        self.global_costmap = None       # ★ 新增
         self.reference_plan = None
         self._goal_active = False
         self._goal_lock = threading.Lock()
@@ -102,19 +128,34 @@ class StuckEscapeNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+
+        # ===== 订阅 local costmap =====
         self.create_subscription(
             OccupancyGrid, self.costmap_topic, self._on_costmap, latched_qos,
             callback_group=self.callback_group)
+
+        # ===== ★ 订阅 global costmap =====
+        self.create_subscription(
+            OccupancyGrid, self.global_costmap_topic,
+            self._on_global_costmap, latched_qos,
+            callback_group=self.callback_group)
+
+        # ===== 订阅原路径 =====
         self.create_subscription(
             Path, self.plan_topic, self._on_plan, 10,
             callback_group=self.callback_group)
 
+        # ===== 发布器 =====
         self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         self.state_pub = self.create_publisher(
             String, "/stuck_escape/state", latched_qos)
+
+        # ===== 服务客户端 =====
         self.clear_global_around = self.create_client(
             ClearCostmapAroundRobot, self.global_clear_service,
             callback_group=self.callback_group)
+
+        # ===== Action Server =====
         self.action_server = ActionServer(
             self, AssistedTeleop, self.action_name,
             execute_callback=self._execute,
@@ -125,16 +166,26 @@ class StuckEscapeNode(Node):
         self._publish_state("IDLE")
         self.get_logger().info(
             f"stuck_escape action 已启动: /{self.action_name}；"
-            f"速度输出={self.cmd_vel_topic}")
+            f"local={self.costmap_topic}, "
+            f"global={self.global_costmap_topic}, "
+            f"cmd_vel={self.cmd_vel_topic}")
 
+    # ==================================================================
+    # 回调
+    # ==================================================================
     def _on_costmap(self, msg: OccupancyGrid):
         self.costmap = msg
 
+    def _on_global_costmap(self, msg: OccupancyGrid):       # ★ 新增
+        self.global_costmap = msg
+
     def _on_plan(self, msg: Path):
         if msg.poses:
-            # 修改后的 BT 每个目标只规划一次，这是本任务的原始参考路径。
             self.reference_plan = msg
 
+    # ==================================================================
+    # Action 生命周期
+    # ==================================================================
     def _on_goal(self, _goal_request):
         if not self.enable:
             return GoalResponse.REJECT
@@ -148,10 +199,14 @@ class StuckEscapeNode(Node):
     def _on_cancel(self, _goal_handle):
         return CancelResponse.ACCEPT
 
+    # ==================================================================
+    # 主执行流
+    # ==================================================================
     def _execute(self, goal_handle):
         started_at = time.monotonic()
         result = AssistedTeleop.Result()
         try:
+            # 1. 等待输入就绪
             if not self._wait_for_inputs(goal_handle, 3.0):
                 if goal_handle.is_cancel_requested:
                     return self._finish_cancel(goal_handle, result, started_at)
@@ -159,21 +214,31 @@ class StuckEscapeNode(Node):
                     goal_handle, result, AssistedTeleop.Result.TF_ERROR,
                     "等待 local costmap/TF 超时", started_at)
 
+            # 2. 清 global costmap 机器人周围
             self._publish_state("REFRESHING_GLOBAL_WINDOW")
             self._refresh_global_window(goal_handle)
             if goal_handle.is_cancel_requested:
                 return self._finish_cancel(goal_handle, result, started_at)
 
+            # 3. 拿机器人位姿
             pose = self._get_robot_pose()
             if pose is None:
                 return self._finish_error(
                     goal_handle, result, AssistedTeleop.Result.TF_ERROR,
                     "无法取得机器人在 local costmap 中的位姿", started_at)
 
-            if self._robot_cost(pose) < self.escape_cost_thr:
-                self.get_logger().info("实时局部图显示起点已可通行，交回原路径")
+            # 4. ★ 同时检查 local 和 global
+            local_cost = self._robot_cost(pose)
+            global_cost = self._robot_global_cost()
+            self.get_logger().info(
+                f"起点 cost: local={local_cost}, global={global_cost}")
+
+            if self._both_costs_ok(local_cost, global_cost):
+                self.get_logger().info(
+                    "local 和 global 均显示起点可通行，交回原路径")
                 return self._finish_success(goal_handle, result, started_at)
 
+            # 5. 进入物理脱困循环
             self._publish_state("ESCAPING")
             return self._escape_until_safe(goal_handle, result, started_at)
         finally:
@@ -181,6 +246,14 @@ class StuckEscapeNode(Node):
             with self._goal_lock:
                 self._goal_active = False
 
+    def _both_costs_ok(self, local_cost, global_cost):
+        """local 和 global 都低于安全阈值才算 OK。"""
+        return (0 <= local_cost < self.safe_cost_thr
+                and 0 <= global_cost < self.global_escape_cost_thr)
+
+    # ==================================================================
+    # 脱困循环
+    # ==================================================================
     def _escape_until_safe(self, goal_handle, result, action_started_at):
         cycle_started_at = time.monotonic()
         start_pose = self._get_robot_pose()
@@ -202,21 +275,31 @@ class StuckEscapeNode(Node):
             if start_pose is not None:
                 moved = math.hypot(
                     pose[0] - start_pose[0], pose[1] - start_pose[1])
-            cost = self._robot_cost(pose)
-            if 0 <= cost < self.safe_cost_thr and (
-                    moved >= self.min_escape_distance or cost == 0):
-                self.get_logger().info(
-                    f"脱困完成: cost={cost}, moved={moved:.3f} m；恢复原路径")
-                return self._finish_success(
-                    goal_handle, result, action_started_at)
+
+            # ★ 同时检查 local 和 global
+            local_cost = self._robot_cost(pose)
+            global_cost = self._robot_global_cost()
+
+            # 成功条件：两者都 OK，且移动了足够距离（或完全没代价）
+            if self._both_costs_ok(local_cost, global_cost):
+                if (moved >= self.min_escape_distance
+                        or local_cost == 0):
+                    self.get_logger().info(
+                        f"脱困完成: local={local_cost}, "
+                        f"global={global_cost}, moved={moved:.3f} m；"
+                        f"恢复原路径")
+                    return self._finish_success(
+                        goal_handle, result, action_started_at)
 
             now = time.monotonic()
+
+            # 每 0.5 秒重新选一次方向
             if now - last_direction_update >= 0.5 or direction_world is None:
                 direction_world = self._find_escape_direction(pose)
                 last_direction_update = now
 
+            # 无安全方向：清图 + 等待，再评估
             if direction_world is None:
-                # 无安全方向时保持 action RUNNING，不把可恢复问题变成 status=6。
                 self._publish_state("WAITING_FOR_SAFE_DIRECTION")
                 self._stop()
                 time.sleep(self.retry_wait_time)
@@ -226,8 +309,8 @@ class StuckEscapeNode(Node):
                 start_pose = self._get_robot_pose()
                 continue
 
+            # 单轮超时：停住、刷新、重来
             if now - cycle_started_at > self.escape_dur_max:
-                # 单轮运动到上限后停住、刷新感知，再安全地开始下一轮。
                 self._publish_state("ESCAPE_REASSESS")
                 self._stop()
                 time.sleep(self.retry_wait_time)
@@ -238,7 +321,9 @@ class StuckEscapeNode(Node):
                 self._publish_state("ESCAPING")
                 continue
 
+            # 输出速度
             self._publish_escape_command(pose[2], direction_world)
+
             feedback = AssistedTeleop.Feedback()
             feedback.current_teleop_duration = Duration(
                 seconds=now - action_started_at).to_msg()
@@ -249,6 +334,9 @@ class StuckEscapeNode(Node):
             goal_handle, result, AssistedTeleop.Result.UNKNOWN,
             "rclpy 已停止", action_started_at)
 
+    # ==================================================================
+    # 输入就绪检查
+    # ==================================================================
     def _wait_for_inputs(self, goal_handle, timeout):
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
@@ -259,9 +347,13 @@ class StuckEscapeNode(Node):
             time.sleep(0.05)
         return False
 
+    # ==================================================================
+    # 清 global costmap 机器人周围
+    # ==================================================================
     def _refresh_global_window(self, goal_handle):
         if self.costmap is None:
             return
+
         if not self.clear_global_around.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn(
                 f"服务不可用: {self.global_clear_service}；仅等待雷达刷新")
@@ -284,12 +376,16 @@ class StuckEscapeNode(Node):
             else:
                 self.get_logger().warn("清理全局动态窗口未完成")
 
+        # 等 global_costmap 完成一次更新（默认 1 Hz）
         deadline = time.monotonic() + self.global_refresh_wait
         while (rclpy.ok() and time.monotonic() < deadline
                and not goal_handle.is_cancel_requested):
             self._stop()
             time.sleep(0.05)
 
+    # ==================================================================
+    # 获取机器人位姿（local costmap frame）
+    # ==================================================================
     def _get_robot_pose(self):
         if self.costmap is None:
             return None
@@ -297,7 +393,7 @@ class StuckEscapeNode(Node):
         try:
             tf = self.tf_buffer.lookup_transform(
                 frame, self.robot_frame, rclpy.time.Time(),
-                timeout=Duration(seconds=0.1))
+                timeout=Duration(seconds=0.5))   # 0.1 → 0.5 秒
         except Exception:
             return None
         q = tf.transform.rotation
@@ -306,6 +402,39 @@ class StuckEscapeNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         return (tf.transform.translation.x, tf.transform.translation.y, yaw)
 
+    # ==================================================================
+    # ★ 查 global_costmap 里机器人的 cost
+    # ==================================================================
+    def _robot_global_cost(self):
+        """用 map→base_footprint TF 在 global_costmap 里查机器人位置 cost。"""
+        if self.global_costmap is None:
+            return -1
+        frame = self.global_costmap.header.frame_id or "map"
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                frame, self.robot_frame, rclpy.time.Time(),
+                timeout=Duration(seconds=0.5))
+        except Exception:
+            return -1
+
+        wx = tf.transform.translation.x
+        wy = tf.transform.translation.y
+        origin = self.global_costmap.info.origin
+        res = self.global_costmap.info.resolution
+        gx = int(math.floor((wx - origin.position.x) / res))
+        gy = int(math.floor((wy - origin.position.y) / res))
+
+        if (gx < 0 or gy < 0
+                or gx >= self.global_costmap.info.width
+                or gy >= self.global_costmap.info.height):
+            return -1
+
+        return self.global_costmap.data[
+            gy * self.global_costmap.info.width + gx]
+
+    # ==================================================================
+    # local costmap 工具
+    # ==================================================================
     def _world_to_grid(self, wx, wy):
         if self.costmap is None:
             return None
@@ -330,6 +459,9 @@ class StuckEscapeNode(Node):
         grid = self._world_to_grid(pose[0], pose[1])
         return -1 if grid is None else self._cost_at(*grid)
 
+    # ==================================================================
+    # 逃出方向选择
+    # ==================================================================
     def _find_escape_direction(self, pose):
         """在 odom costmap 中选安全低代价方向，并偏向原路径前方。"""
         grid = self._world_to_grid(pose[0], pose[1])
@@ -383,7 +515,7 @@ class StuckEscapeNode(Node):
         try:
             tf = self.tf_buffer.lookup_transform(
                 costmap_frame, plan_frame, rclpy.time.Time(),
-                timeout=Duration(seconds=0.1))
+                timeout=Duration(seconds=0.5))
         except Exception:
             return None
 
@@ -425,6 +557,9 @@ class StuckEscapeNode(Node):
         return math.atan2(
             target[1] - robot_pose[1], target[0] - robot_pose[0])
 
+    # ==================================================================
+    # 速度输出
+    # ==================================================================
     def _publish_escape_command(self, robot_yaw, direction_world):
         heading_error = normalize_angle(direction_world - robot_yaw)
         command = Twist()
@@ -442,6 +577,9 @@ class StuckEscapeNode(Node):
         msg.data = state
         self.state_pub.publish(msg)
 
+    # ==================================================================
+    # 结束动作
+    # ==================================================================
     @staticmethod
     def _set_elapsed(result, started_at):
         result.total_elapsed_time = Duration(

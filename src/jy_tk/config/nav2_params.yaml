@@ -80,8 +80,8 @@ amcl:
     # true ：使用 initial_pose 里的固定值（仅适合机器人总在固定点启动的场景）
     set_initial_pose: true
     initial_pose:
-      x: 0.0
-      y: 0.0
+      x: -0.1
+      y: -0.9
       z: 0.0
       yaw: 0.0
 
@@ -421,7 +421,7 @@ planner_server:
     # 替代方案：SmacPlanner2D / SmacPlannerHybrid（更平滑但需要更多调参）
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.3                  # 目标点容差（m）
+      tolerance: 0.8                  # 目标点容差（m）
       use_astar: false                # true=A*，false=Dijkstra
                                       # A* 更快，Dijkstra 更稳
       allow_unknown: true             # 允许穿越未知区域（地图不全时用）

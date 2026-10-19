@@ -92,8 +92,8 @@ def generate_launch_description():
                 # TW360 使用扫描周期/包号分帧；时间窗模式不适用于该型号。
                 'UseTimeWindow': False,
 
-                # TW360 约 5000 UDP 包/秒：关闭可选逐包算法，避免 SDK 解码队列积压。
-                # 坐标解算、距离范围和 ROS 发布不受影响。
+                # 开启 SDK 点云算法链，用于验证 TW360 近距离点云是否恢复。
+                # 注意观察高包率下是否重新出现解码积压、点云延迟或闪烁。
                 'EnableLidarAlgo': False,
 
                 # udp ros msg发布

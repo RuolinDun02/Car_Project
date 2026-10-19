@@ -6,12 +6,22 @@ polygon_keepout_mask_server:
     mask_topic: "/keepout_filter_mask"
     filter_info_topic: "/costmap_filter_info"
 
-    # 必须保留为字符串，Python 节点会用 JSON 解析
-    polygon_points: >-
+    # ★ 禁行区名称列表（每个名称对应下方 polygon_<name> 参数）
+    polygons: ["zone_a", "zone_b"]
+
+    # ---- 禁行区 A（原有）----
+    polygon_zone_a: >-
       [[-4.66, 0.532],
-       [-1.42, 0.234],
-       [-1.51, -4.39],
+       [-1.40, 1.10],
+       [-1.71, -4.39],
        [-4.63, -4.30]]
+
+    # ---- ★ 禁行区 B（新增，改成你实际要禁的坐标）----
+    polygon_zone_b: >-
+      [[1.09, -4.59],
+       [1.03, -5.5],
+       [-0.4, -5.5],
+       [-0.4, -4.5]]
 
     inside_value: 100
     outside_value: 0

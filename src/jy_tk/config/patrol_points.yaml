@@ -50,6 +50,7 @@ multi_point_patrol:
     next_topic: /patrol/next
     arrived_topic: /patrol/arrived
     state_topic: /patrol/state
+    current_point_topic: /patrol/current_point
 
     map_frame: map
     odom_frame: odom

@@ -19,7 +19,7 @@
   机械臂完成动作后，调用：
     curl -X POST http://<jetson_ip>:8189/api/arm_done \
       -H 'Content-Type: application/json' \
-      -d '{"arm":"BOTH","result":"ok"}'
+      -d '{"arm":"BOTH","result":"ok","point_id":"1"}'
 """
 
 import asyncio
@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 
@@ -51,6 +52,8 @@ class ArmNavBridge(Node):
         # ---------- 参数 ----------
         self.declare_parameter('arm_api_base', 'http://127.0.0.1:8188')
         self.declare_parameter('arrived_topic', '/patrol/arrived')
+        self.declare_parameter(
+            'current_point_topic', '/patrol/current_point')
         self.declare_parameter('next_topic', '/patrol/next')
         self.declare_parameter('http_port', 8189)
         self.declare_parameter('arm_speed', 12.0)
@@ -59,13 +62,18 @@ class ArmNavBridge(Node):
         p = self.get_parameter
         self.arm_api_base = p('arm_api_base').value.rstrip('/')
         self.arrived_topic = p('arrived_topic').value
+        self.current_point_topic = p('current_point_topic').value
         self.next_topic = p('next_topic').value
         self.http_port = int(p('http_port').value)
         self.arm_speed = float(p('arm_speed').value)
         self.trigger_arm_on_arrive = bool(p('trigger_arm_on_arrive').value)
 
-        # 当前已到达并执行机械臂动作的点位。
+        self.state_lock = threading.RLock()
+
+        # 根据 map -> base_footprint 二维位置识别的当前点位。
         self.current_point_id = None
+        # 已完成导航和对接，正在等待机械臂完成的点位。
+        self.arm_pending_point_id = None
 
         # 固定巡检顺序：1 → 2 → 结束。
         self.next_point_map = {
@@ -74,8 +82,18 @@ class ArmNavBridge(Node):
         }
 
         # ---------- ROS pub/sub ----------
-        self.create_subscription(
+        self.arrived_sub = self.create_subscription(
             String, self.arrived_topic, self.on_arrived, 10)
+
+        current_point_qos = QoSProfile(depth=1)
+        current_point_qos.reliability = ReliabilityPolicy.RELIABLE
+        current_point_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.current_point_sub = self.create_subscription(
+            String,
+            self.current_point_topic,
+            self.on_current_point,
+            current_point_qos,
+        )
         self.next_pub = self.create_publisher(String, self.next_topic, 10)
 
         # ---------- HTTP server ----------
@@ -86,6 +104,7 @@ class ArmNavBridge(Node):
         self.get_logger().info('arm_nav_bridge 已启动')
         self.get_logger().info(f'  机械臂 API: {self.arm_api_base}')
         self.get_logger().info(f'  订阅: {self.arrived_topic}')
+        self.get_logger().info(f'  点位同步: {self.current_point_topic}')
         self.get_logger().info(f'  发布: {self.next_topic}')
         self.get_logger().info(f'  HTTP 监听: 0.0.0.0:{self.http_port}')
         self.get_logger().info(
@@ -96,9 +115,37 @@ class ArmNavBridge(Node):
     # ================================================================
     # ROS → HTTP
     # ================================================================
+    def on_current_point(self, msg: String):
+        point_id = msg.data.strip() or None
+
+        with self.state_lock:
+            old_point_id = self.current_point_id
+            self.current_point_id = point_id
+
+            if (
+                self.arm_pending_point_id is not None
+                and self.arm_pending_point_id != point_id
+            ):
+                old_pending_id = self.arm_pending_point_id
+                self.arm_pending_point_id = None
+                self.get_logger().warn(
+                    f'机器人已离开待处理点位 '
+                    f'[{old_pending_id}]，清除机械臂待完成状态')
+
+        if old_point_id != point_id:
+            self.get_logger().info(
+                f'当前点位更新: '
+                f'{old_point_id or "None"} -> {point_id or "None"}')
+
     def on_arrived(self, msg: String):
-        point_id = msg.data
-        self.current_point_id = point_id
+        point_id = msg.data.strip()
+        if not point_id:
+            self.get_logger().error('收到空的导航到达点位，忽略')
+            return
+
+        with self.state_lock:
+            self.current_point_id = point_id
+            self.arm_pending_point_id = point_id
         self.get_logger().info(f'导航到达 [{point_id}]')
 
         if not self.trigger_arm_on_arrive:
@@ -138,7 +185,15 @@ class ArmNavBridge(Node):
 
         @app.get('/health')
         async def health():
-            return {'status': 'healthy', 'node': 'arm_nav_bridge'}
+            with bridge.state_lock:
+                current_point_id = bridge.current_point_id
+                pending_point_id = bridge.arm_pending_point_id
+            return {
+                'status': 'healthy',
+                'node': 'arm_nav_bridge',
+                'current_point_id': current_point_id,
+                'arm_pending_point_id': pending_point_id,
+            }
 
         @app.post('/api/arm_done')
         async def arm_done(req: ArmDoneRequest):
@@ -147,9 +202,11 @@ class ArmNavBridge(Node):
                 f'收到机械臂完成信号: arm={req.arm} '
                 f'result={req.result} point={req.point_id}')
 
-            next_point_id = bridge.next_point_map.get(
-                bridge.current_point_id
-            )
+            with bridge.state_lock:
+                current_point_id = bridge.current_point_id
+                pending_point_id = bridge.arm_pending_point_id
+
+            next_point_id = bridge.next_point_map.get(current_point_id)
 
             if req.result.strip().lower() != 'ok':
                 message = (
@@ -165,8 +222,8 @@ class ArmNavBridge(Node):
                     'next_point_id': next_point_id,
                 }
 
-            if bridge.current_point_id is None:
-                message = '尚未收到导航到达消息；下一点位=None'
+            if current_point_id is None:
+                message = '机器人当前不在任何已配置点位附近；下一点位=None'
                 bridge.get_logger().error(f'  ❌ {message}')
                 return {
                     'status': 'failed',
@@ -176,11 +233,37 @@ class ArmNavBridge(Node):
                     'next_point_id': None,
                 }
 
-            if req.point_id and req.point_id != bridge.current_point_id:
+            request_point_id = req.point_id.strip()
+            if not request_point_id:
+                message = '机械臂完成消息必须提供 point_id'
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
+            if request_point_id != current_point_id:
                 message = (
-                    f'上报点位 {req.point_id} 与当前点位 '
-                    f'{bridge.current_point_id} 不一致；'
+                    f'上报点位 {request_point_id} 与当前点位 '
+                    f'{current_point_id} 不一致；'
                     f'下一点位={next_point_id}'
+                )
+                bridge.get_logger().error(f'  ❌ {message}')
+                return {
+                    'status': 'failed',
+                    'success': False,
+                    'message': message,
+                    'next_published': False,
+                    'next_point_id': next_point_id,
+                }
+
+            if request_point_id != pending_point_id:
+                message = (
+                    f'点位 {request_point_id} 没有待完成的机械臂任务；'
+                    f'当前待处理点位={pending_point_id or "None"}'
                 )
                 bridge.get_logger().error(f'  ❌ {message}')
                 return {
@@ -192,8 +275,23 @@ class ArmNavBridge(Node):
                 }
 
             if next_point_id is None:
+                with bridge.state_lock:
+                    if (
+                        bridge.current_point_id != request_point_id
+                        or bridge.arm_pending_point_id != request_point_id
+                    ):
+                        message = '点位状态已变化，未确认机械臂完成'
+                        bridge.get_logger().error(f'  ❌ {message}')
+                        return {
+                            'status': 'failed',
+                            'success': False,
+                            'message': message,
+                            'next_published': False,
+                            'next_point_id': None,
+                        }
+                    bridge.arm_pending_point_id = None
                 bridge.get_logger().info(
-                    f'  ✅ 点位 {bridge.current_point_id} 任务完成，'
+                    f'  ✅ 点位 {current_point_id} 任务完成，'
                     '巡检结束；下一点位=None')
                 return {
                     'status': 'finished',
@@ -205,21 +303,36 @@ class ArmNavBridge(Node):
 
             msg = String()
             msg.data = next_point_id
-            try:
-                bridge.next_pub.publish(msg)
-            except Exception as exception:
-                message = (
-                    f'发布 {bridge.next_topic} 失败: {exception}；'
-                    f'下一点位={next_point_id}'
-                )
-                bridge.get_logger().error(f'  ❌ {message}')
-                return {
-                    'status': 'failed',
-                    'success': False,
-                    'message': message,
-                    'next_published': False,
-                    'next_point_id': next_point_id,
-                }
+            with bridge.state_lock:
+                if (
+                    bridge.current_point_id != request_point_id
+                    or bridge.arm_pending_point_id != request_point_id
+                ):
+                    message = '点位状态已变化，未发布下一点'
+                    bridge.get_logger().error(f'  ❌ {message}')
+                    return {
+                        'status': 'failed',
+                        'success': False,
+                        'message': message,
+                        'next_published': False,
+                        'next_point_id': next_point_id,
+                    }
+                try:
+                    bridge.next_pub.publish(msg)
+                except Exception as exception:
+                    message = (
+                        f'发布 {bridge.next_topic} 失败: {exception}；'
+                        f'下一点位={next_point_id}'
+                    )
+                    bridge.get_logger().error(f'  ❌ {message}')
+                    return {
+                        'status': 'failed',
+                        'success': False,
+                        'message': message,
+                        'next_published': False,
+                        'next_point_id': next_point_id,
+                    }
+                bridge.arm_pending_point_id = None
 
             bridge.get_logger().info(
                 f'  ✅ 已发 {bridge.next_topic}={next_point_id}，'

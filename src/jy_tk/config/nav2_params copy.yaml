@@ -1,0 +1,602 @@
+# ============================================================================
+# Nav2 参数文件
+# 适配平台：FW-mid 全向底盘 + 探维 Halo 雷达 + robot_localization EKF
+# ROS 版本：Jazzy
+#
+# TF 树：
+#   map ─ odom ─ base_footprint ─ base_link ─ lidar_link ─ TanwayTP
+#    ↑      ↑          ↑
+#   AMCL   EKF        EKF 或静态 TF
+#
+# 数据流：
+#   /scan → costmap → planner → controller → /cmd_vel
+#                                                ↓
+#                                    cmd_vel_to_ctrl_cmd_bridge
+#                                                ↓
+#                                           /ctrl_cmd → 底盘
+# ============================================================================
+
+
+# ============================================================================
+# AMCL —— 蒙特卡洛粒子滤波定位
+# 作用：用 2D 激光扫描匹配静态地图，估计机器人在 map 中的位置
+# 输出：/amcl_pose 话题 + map → odom 的 TF
+# ============================================================================
+amcl:
+  ros__parameters:
+    use_sim_time: false
+
+    # ---- 坐标系 ----
+    global_frame_id: map              # 全局坐标系（地图）
+    odom_frame_id: odom               # 里程计坐标系（EKF 发）
+    base_frame_id: base_footprint     # 机器人本体坐标系
+    scan_topic: /scan                 # 输入激光话题
+
+    # ---- 运动模型 ----
+    # DifferentialMotionModel：差速模型，适用于轮式/履带机器人
+    # OmniMotionModel：全向模型，适用于麦轮/全向底盘
+    # 注意：FW-mid 可横移，但 AMCL 一般用差速模型就够，横移场景较少
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    # ---- 里程计噪声参数 ----
+    # alpha1~alpha4 描述旋转/平移过程的噪声
+    # alpha5 仅在 OmniMotionModel 下有效
+    # 数值越大，对里程计越不信任，粒子扩散越广
+    # 调参建议：先保守用 0.2，如果定位抖动再增大
+    alpha1: 0.2                       # 旋转→旋转噪声
+    alpha2: 0.2                       # 旋转→平移噪声
+    alpha3: 0.2                       # 平移→平移噪声
+    alpha4: 0.2                       # 平移→旋转噪声
+    alpha5: 0.2
+
+    # ---- 激光模型 ----
+    # likelihood_field      ：推荐，速度快，鲁棒
+    # likelihood_field_prob ：带波束跳过，慢但更准
+    # beam                  ：最慢，仅用于仿真对照
+    laser_model_type: "likelihood_field"
+    laser_max_range: 30.0             # 与雷达最远有效距离一致
+    laser_min_range: 0.3              # 与雷达盲区一致
+    max_beams: 60                     # 每次更新使用的激光束数
+                                      # 越多越准越慢；30~60 平衡
+
+    # ---- 粒子滤波参数 ----
+    pf_err: 0.05                      # 粒子分布误差
+    pf_z: 0.99                        # 粒子分布置信度
+    resample_interval: 1              # 每 N 次更新重采样一次
+
+    # ---- 更新触发条件 ----
+    # 机器人移动超过这两个阈值时才更新粒子
+    # 太小→抖动；太大→定位滞后
+    update_min_d: 0.15                # 平移触发阈值（m）
+    update_min_a: 0.05                 # 旋转触发阈值（rad）
+
+    # ---- 恢复行为（处理机器人被抱起或卡住）----
+    # 0.0 表示禁用基于随机粒子的自动恢复
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+    # ---- 初始位姿 ----
+    # false：启动后需要用户发 /initialpose 或 Foxglove 手动设点
+    # true ：使用 initial_pose 里的固定值（仅适合机器人总在固定点启动的场景）
+    set_initial_pose: true
+    initial_pose:
+      x: -0.1
+      y: -0.9
+      z: 0.0
+      yaw: 0.0
+
+    # ---- TF 广播 ----
+    tf_broadcast: true                # 发 map → odom
+    transform_tolerance: 1.0          # TF 时间戳允许的最大延迟（s）
+    save_pose_rate: 0.5               # 保存最近位姿的频率（Hz）
+
+
+# ============================================================================
+# bt_navigator —— 行为树导航调度器
+# 作用：接收 NavigateToPose / NavigateThroughPoses 目标，
+#       用行为树调度 planner / controller / behavior 等插件
+# ============================================================================
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+
+    global_frame: map                 # 全局坐标系
+    robot_base_frame: base_footprint  # 机器人本体坐标系
+    odom_topic: /odom                 # 里程计话题（EKF 发）
+    transform_tolerance: 0.5          # TF 超时（s）
+        # ★ 新增：指定自定义 BT XML（去掉 Spin/BackUp）
+    default_nav_to_pose_bt_xml: "/home/jiayi/Car_Project/install/jy_tk/share/jy_tk/config/bt/navigate_custom.xml"
+    default_nav_through_poses_bt_xml: "/home/jiayi/Car_Project/install/jy_tk/share/jy_tk/config/bt/navigate_custom.xml"
+
+    # Jazzy 默认使用官方 BT XML，无需再列出 plugin_lib_names
+    # 如果要自定义行为树，用 default_nav_to_pose_bt_xml 指定 XML 路径
+
+
+# ============================================================================
+# controller_server —— 局部控制器（跟踪路径）
+# 作用：接收全局路径，输出 /cmd_vel 速度指令
+# ============================================================================
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+
+    # ---- 运行频率 ----
+    controller_frequency: 20.0        # 控制器循环频率（Hz）
+
+    # ---- 速度阈值 ----
+    # 低于这些速度视为"停下"，避免持续发微小速度
+    min_x_velocity_threshold: 0.001   # m/s
+    min_y_velocity_threshold: 0.001   # m/s
+    min_theta_velocity_threshold: 0.001  # rad/s
+
+    # ---- 超时容忍 ----
+    failure_tolerance: 0.3            # 控制失败容忍时长（s）
+
+    # ---- 插件 ----
+    progress_checker_plugin: "progress_checker"     # Jazzy 单数
+    goal_checker_plugins: ["general_goal_checker"]  # 复数
+    controller_plugins: ["FollowPath"]
+
+    # ---- 进度检查 ----
+    # 如果机器人在规定时间内没走够距离，认为卡住
+    progress_checker:
+      # plugin: "nav2_controller::SimpleProgressChecker"
+      # required_movement_radius: 0.2   # 必须移动的最小距离（m）
+      # movement_time_allowance: 30.0   # 时间窗口（s）
+      plugin: "nav2_controller::PoseProgressChecker"
+      required_movement_radius: 0.1
+      required_movement_angle: 0.1
+      movement_time_allowance: 29.0
+
+    # ---- 目标检查 ----
+    # 位置和朝向都在容差内才算到达
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.05        # 位置容差（m）
+      yaw_goal_tolerance: 0.05        # 朝向容差（rad）
+
+    # ---- 路径跟踪插件：Regulated Pure Pursuit ----
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+
+      # 速度
+      desired_linear_vel: 0.2         # 目标线速度（m/s），保守起步
+      min_approach_linear_velocity: 0.05   # 接近目标时的最低速度
+
+      # 前视距离
+      lookahead_dist: 0.75             # 默认前视距离（m）
+      min_lookahead_dist: 0.4         # 最小前视距离
+      max_lookahead_dist: 0.9         # 最大前视距离
+      lookahead_time: 1.5             # 速度自适应时的时域
+      use_velocity_scaled_lookahead_dist: false
+
+      # 旋转
+      rotate_to_heading_angular_vel: 0.2   # 原地旋转角速度（rad/s）
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.5   # 大于 28° 才原地旋转
+      max_angular_accel: 1.0               # 最大角加速度（rad/s²）
+
+      # 避障
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+
+      # 速度调节
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.9    # 转弯半径阈值
+      regulated_linear_scaling_min_speed: 0.05    # 转弯最低速度
+
+      # 反向
+      allow_reversing: false
+      transform_tolerance: 0.2
+
+
+# ============================================================================
+# local_costmap —— 局部代价地图
+# 作用：以机器人为中心的滚动窗口，实时反映周围障碍物
+# 特点：小范围（3×3m）、高频更新、用激光实时清障
+# ★ 方案 B：局部地图也加 keepout_filter（防止被推入禁行区）
+# ============================================================================
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+
+      # ---- 运行频率 ----
+      update_frequency: 5.0           # 代价地图更新频率（Hz）
+      publish_frequency: 5.0          # 发布频率（Hz）
+
+      # ---- 坐标系 ----
+      global_frame: odom              # 局部地图用 odom，避免 map 跳变影响
+      robot_base_frame: base_footprint
+      rolling_window: true            # 跟随机器人滚动
+
+      # ---- 尺寸 ----
+      width: 3                        # 宽度（m）
+      height: 3                       # 高度（m）
+      resolution: 0.05                # 分辨率（m/格）
+
+      # ---- 机器人形状 ----
+      robot_radius: 0.35              # 圆形近似半径（m），FW-mid 半宽 + 余量
+                                      # 精确形状可以用 footprint 参数替代
+
+      # ---- 插件 ----
+      # ★ 方案 B：把 keepout_filter 放进 plugins
+      plugins: ["obstacle_layer", "keepout_filter", "inflation_layer"]
+
+      # ---- 障碍物图层 ----
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          max_obstacle_height: 2.0    # 高于这个高度的障碍物忽略
+          clearing: True              # 允许清除障碍物
+          marking: True               # 允许标记障碍物
+          raytrace_max_range: 30.0    # 清障射线的最大距离
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5     # 标记障碍的最大距离（局部地图只看近处）
+          obstacle_min_range: 0.0
+
+      # ---- ★ Keepout 过滤层（方案 B 新增）----
+      # 局部地图也订阅 /costmap_filter_info，动态应用禁行区
+      # 注意：local_costmap 的 global_frame 是 odom，keepout mask 是 map 坐标系
+      #       Nav2 会自动做 map → odom 变换
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: true
+        filter_info_topic: "/costmap_filter_info"
+        transform_tolerance: 0.2
+        override_lethal_cost: false
+
+      # ---- 膨胀图层 ----
+      # 在障碍物周围生成一圈"缓冲"，让路径远离障碍
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0    # 代价衰减因子，越小膨胀越"贵"
+        inflation_radius: 0.6      # 膨胀半径（m）
+
+      # ---- 其他 ----
+      always_reset_initial_costmap: True   # 启动时重置代价地图
+      track_unknown_space: false            # 局部地图不追踪未知区域
+      footprint_padding: 0.01               # 机器人轮廓外扩（m）
+
+
+# ============================================================================
+# global_costmap —— 全局代价地图
+# 作用：覆盖整张静态地图，用于全局路径规划
+# 特点：加载静态地图 + 激光更新的障碍物 + 禁行区
+# ★ 方案 B：keepout_filter 放进 plugins
+# ============================================================================
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+
+      update_frequency: 1.0
+      publish_frequency: 1.0
+
+      global_frame: map               # 全局地图用 map
+      robot_base_frame: base_footprint
+      robot_radius: 0.35
+      resolution: 0.05
+
+      # ---- 追踪未知区域 ----
+      # true ：地图上的未知区域（灰色）会被视为障碍
+      # false：未知区域可通行（适合地图不全时）
+      track_unknown_space: false
+
+      # ==================================================================
+      # ★ 禁行区配置：方案 B —— KeepoutFilter（栅格掩码）
+      # ==================================================================
+      #
+      # 【当前方案】KeepoutFilter（栅格掩码）
+      #   - 适用：复杂不规则区域、多场景切换、临时施工区
+      #   - 优点：运行时通过 Topic 热切换/取消，真正的动态禁行
+      #   - 缺点：需额外启动 mask_server + filter_info_publisher
+      #   - 已启动：polygon_keepout_mask_server（发布 /costmap_filter_info）
+      #
+      # 【备用方案】ForbiddenZoneLayer（矢量多边形）
+      #   - 适用：固定简单几何区域（货架、围栏、永久禁区）
+      #   - 优点：配置简单，仅需 YAML
+      #   - 缺点：运行时动态修改受限
+      # ==================================================================
+
+      # ---- 插件列表 ----
+      # ★ 方案 B：keepout_filter 放进 plugins
+      plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
+
+      # ---- ★ Keepout 过滤层 ----
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: true
+        filter_info_topic: "/costmap_filter_info"
+        transform_tolerance: 0.2
+        # 严格禁止进入
+        override_lethal_cost: false
+
+      # 静态图层：加载 map_server 发布的地图
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+
+      # 障碍物图层：动态障碍物（人、其他车等）
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          raytrace_max_range: 30.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+
+      # ================================================================
+      # ★ 备用方案：ForbiddenZoneLayer（矢量多边形）
+      # 矢量多边形禁行区，坐标单位：米，相对于 global_frame (map)
+      # 运行时修改方式：
+      #   ros2 param set /global_costmap/global_costmap \
+      #     forbidden_zone_layer.zone_a.polygon_points "[[新坐标...]]"
+      # 运行时取消方式（无原生 disable，设为空列表）：
+      #   ros2 param set /global_costmap/global_costmap \
+      #     forbidden_zone_layer.polygons "[]"
+      # ================================================================
+      # forbidden_zone_layer:
+      #   plugin: "nav2_costmap_2d::ForbiddenZoneLayer"
+      #   enabled: true
+
+      #   # 禁行区名称列表，每个名称对应下方一个子配置块
+      #   # 运行时可通过 set_parameters 增删此列表中的名称来添加/移除区域
+      #   polygons: ["zone_a", "zone_b"]
+
+      #   # 禁行区 A：示例矩形区域（请根据实际地图坐标修改）
+      #   zone_a:
+      #     # 多边形顶点列表 [[x1,y1], [x2,y2], ...]，单位：米
+      #     # 支持凸/凹多边形，至少 3 个顶点
+      #     polygon_points: "[[-4.66, 0.532], [-1.42, 0.234], [-1.51, -4.39], [-4.63, -4.30]]"
+      #     # 区域类型：
+      #     #   "forbidden" — 完全禁止通行（代价值 = lethal）
+      #     #   "slow_down" — 减速区域（代价值按 cost_scaling_factor 计算）
+      #     type: "forbidden"
+
+      #   # 禁行区 B：示例三角形区域
+      #   # zone_b:
+      #   #   polygon_points: [[6.0, 0.0], [8.0, 0.0], [7.0, 2.0]]
+      #   #   type: "forbidden"
+
+      # 膨胀图层
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.6
+
+      footprint_padding: 0.01
+
+
+# ============================================================================
+# map_server —— 加载静态地图
+# 从 YAML 文件读取地图，发布 /map 话题（OccupancyGrid）
+# ============================================================================
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: "/home/jiayi/Car_Project/src/jy_tk/maps/my_map3.yaml"                # 由 launch 参数覆盖
+
+
+# ============================================================================
+# map_saver —— 保存当前地图
+# 与 map_server 互补，提供保存地图的服务
+# ============================================================================
+map_saver:
+  ros__parameters:
+    use_sim_time: false
+    save_map_timeout: 5.0             # 保存超时（s）
+    free_thresh_default: 0.25         # 空闲区域阈值
+    occupied_thresh_default: 0.65     # 占用区域阈值
+
+
+# ============================================================================
+# planner_server —— 全局路径规划
+# 输入：起点（当前位姿）+ 终点（目标） + 全局代价地图
+# 输出：/plan（nav_msgs/Path）
+# ============================================================================
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0   # 期望规划频率（Hz）
+
+    planner_plugins: ["GridBased"]
+
+    # NavfnPlanner：基于 Dijkstra/A* 的栅格规划
+    # 优点：稳定、快、适合大多数场景
+    # 缺点：不做运动学平滑，路径可能不够平滑
+    # 替代方案：SmacPlanner2D / SmacPlannerHybrid（更平滑但需要更多调参）
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.8                  # 目标点容差（m）
+      use_astar: false                # true=A*，false=Dijkstra
+                                      # A* 更快，Dijkstra 更稳
+      allow_unknown: true             # 允许穿越未知区域（地图不全时用）
+
+
+# ============================================================================
+# smoother_server —— 路径平滑
+# 对规划出的路径做平滑处理，让机器人走得更顺
+# ============================================================================
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000                   # 最大迭代次数
+      do_refinement: True
+
+
+# ============================================================================
+# behavior_server —— 恢复行为
+# 当导航失败（卡住、路径受阻）时执行恢复动作
+# 插件：spin（原地转）、backup（后退）、wait（等待）
+# ============================================================================
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+
+    global_frame: odom
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0          # 碰撞检测预判时间（s）
+
+    # 旋转限制
+    max_rotational_vel: 0.3           # 最大角速度（rad/s）
+    min_rotational_vel: 0.15           # 最小角速度
+    rotational_acc_lim: 1.5           # 角加速度上限（rad/s²）
+
+
+# ============================================================================
+# robot_state_publisher —— 发布 URDF 关节 TF
+# ============================================================================
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: false
+
+
+# ============================================================================
+# waypoint_follower —— 多点巡航
+# 依次导航到多个航点，每个点可停留指定时间
+# ============================================================================
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false            # 失败后是否停止（false=继续下一个）
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 0      # 到达航点后停留时间（s）
+
+
+# ============================================================================
+# velocity_smoother —— 速度平滑
+# 对 controller_server 输出的 /cmd_vel 做加速度限制，避免急启急停
+# 输出 /cmd_vel_smoothed，桥接节点应订阅这个而不是 /cmd_vel
+# ============================================================================
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0         # 平滑频率（Hz）
+    scale_velocities: False
+    feedback: "OPEN_LOOP"             # OPEN_LOOP 或 CLOSED_LOOP
+    max_velocity: [0.6, 0.0, 0.3]     # [vx_max, vy_max, wz_max]
+    min_velocity: [-0.6, 0.0, -0.3]
+    max_accel: [0.1, 0.0, 0.3]        # 加速度上限
+    max_decel: [-0.1, 0.0, -0.3]      # 减速度上限
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+# ============================================================================
+# collision_monitor —— 碰撞监控
+# 用孤立话题 + 真实 scan 源，让它能正常工作但不干扰主链路
+# ============================================================================
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+
+    # 孤立话题，不干扰主链路
+    cmd_vel_in_topic: collision_monitor_in
+    cmd_vel_out_topic: collision_monitor_out
+
+    transform_tolerance: 0.2
+    source_timeout: 5.0
+    stop_pub_timeout: 2.0
+
+    # ★ 必须给有效配置，不能是空列表
+    polygons: ["PolygonStop"]
+    PolygonStop:
+      type: "polygon"
+      points: "[[0.5, 0.5], [0.5, -0.5], [-0.5, -0.5], [-0.5, 0.5]]"
+      action_type: "stop"
+      min_points: 2
+      visualize: False
+      polygon_pub_topic: "polygon_stop"
+
+    # ★ observation_sources 必须非空
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: /scan
+
+# ============================================================================
+# docking_server —— 自动充电对接（Jazzy 新增）
+# 你不需要这个功能，但 nav2_bringup 默认会启动它，
+# 所以给它一个最小可用配置让 configure 通过。
+# ============================================================================
+docking_server:
+  ros__parameters:
+    use_sim_time: false
+
+    controller_frequency: 50.0
+    initial_perception_timeout: 5.0
+    wait_charge_timeout: 5.0
+    dock_approach_timeout: 30.0
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.1
+    max_retries: 3
+
+    base_frame: base_footprint
+    fixed_frame: odom
+    dock_backwards: false
+    dock_prestaging_tolerance: 0.5
+
+    # ---- 必须给 dock 插件类型 ----
+    dock_plugins: ['simple_charging_dock']
+    simple_charging_dock:
+      plugin: 'opennav_docking::SimpleChargingDock'
+      docking_threshold: 0.05
+      staging_x_offset: -0.7
+      use_external_detection_pose: false
+      use_battery_status: false
+      use_stall_detection: false
+      external_detection_timeout: 1.0
+      external_detection_translation_x: -0.18
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: 0.0
+      external_detection_rotation_pitch: 0.0
+      external_detection_rotation_yaw: 0.0
+      filter_coef: 0.1
+
+    # ---- 必须给 dock 实例 ----
+    docks: ['home_dock']
+    home_dock:
+      type: 'simple_charging_dock'
+      frame: map
+      pose: [0.0, 0.0, 0.0]

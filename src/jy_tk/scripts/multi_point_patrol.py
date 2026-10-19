@@ -15,10 +15,41 @@
     → UNDOCKING        收到下一点后，先直线后退
     → NAVIGATING       前往下一个点
 
-★ 本次修改：
-  1. 订阅 /goal_pose，检测 Foxglove/RViz 等外部干预
-  2. DOCKED 状态下定期核验位置，偏离则自动清除停靠状态
-  3. 收到新目标时若 TF 不可用，保守清除停靠状态，不再直接拒绝
+点位同步：
+  /patrol/current_point 发布 base_footprint 当前位于哪个配置点附近。
+  只比较 map 中的二维位置，不检查航向角。空字符串表示不在任何点位附近。
+
+下一点输入：
+  /patrol/next         std_msgs/msg/String
+  数据为点号，如 "1"、"2"
+
+对接接口：
+  /docking/request     std_msgs/msg/String   发 "start"（或点号）
+  /docking/complete    std_msgs/msg/String   收 "aligned"/"fallback"/"failed"
+
+对外输出：
+  /patrol/arrived      std_msgs/msg/String
+  只有“导航 + 对接”全部完成后，才发布对应点号
+
+状态输出：
+  /patrol/state        std_msgs/msg/String
+
+常用命令：
+  1. 启动巡检，前往点位 1：
+     curl -X POST http://127.0.0.1:8189/api/trigger_nav \
+       -H 'Content-Type: application/json' \
+       -d '{}'
+
+  2. 点位 1 机械臂任务完成，继续前往点位 2：
+     curl -X POST http://127.0.0.1:8189/api/arm_done \
+       -H 'Content-Type: application/json' \
+       -d '{"arm":"BOTH","result":"ok","point_id":"1"}'
+
+  3. 跳过机械臂动作，通过 HTTP 直接发布点位 2：
+     curl -X POST http://127.0.0.1:8189/api/trigger_nav \
+       -H 'Content-Type: application/json' \
+       -d '{"point_id":"2"}'
+
 """
 
 import math
@@ -79,7 +110,7 @@ class MultiPointPatrol(Node):
         # 收到新目标时，用地图坐标核验记录的停靠点是否仍然有效。
         self.declare_parameter("docked_position_tolerance", 0.5)
 
-        # ★ DOCKED 状态下定期核验位置的间隔（秒）
+        # 定期根据 map -> base_footprint 同步所在点位的间隔。
         self.declare_parameter("docked_verify_interval", 1.0)
 
         # 节点启动后的第一次导航前，先后退、旋转一周并短暂停稳。
@@ -108,6 +139,10 @@ class MultiPointPatrol(Node):
         self.declare_parameter("next_topic", "/patrol/next")
         self.declare_parameter("arrived_topic", "/patrol/arrived")
         self.declare_parameter("state_topic", "/patrol/state")
+        self.declare_parameter(
+            "current_point_topic",
+            "/patrol/current_point",
+        )
 
         # ★ 对接控制器接口
         self.declare_parameter("docking_request_topic", "/docking/request")
@@ -181,6 +216,9 @@ class MultiPointPatrol(Node):
         self.state_topic = str(
             self.get_parameter("state_topic").value
         )
+        self.current_point_topic = str(
+            self.get_parameter("current_point_topic").value
+        )
         self.docking_request_topic = str(
             self.get_parameter("docking_request_topic").value
         )
@@ -226,7 +264,10 @@ class MultiPointPatrol(Node):
         self.state = PatrolState.IDLE
 
         self.target_point_id = None
+        # 已经完成对接的点位，供巡检流程判断是否需要退出。
         self.current_point_id = None
+        # 仅表示二维位置位于哪个配置点附近，不代表已完成对接。
+        self.located_point_id = None
 
         self.initial_prepare_completed = False
         self.initial_stage_started_at = None
@@ -242,7 +283,7 @@ class MultiPointPatrol(Node):
         # ★ 对接阶段起始时间
         self.docking_started_at = None
 
-        # ★ DOCKED 状态定期核验
+        # 根据 map -> base_footprint 定期同步所在点位。
         self.last_docked_verify_at = None
 
         self.nav_goal_handle = None
@@ -298,6 +339,12 @@ class MultiPointPatrol(Node):
             state_qos,
         )
 
+        self.current_point_pub = self.create_publisher(
+            String,
+            self.current_point_topic,
+            state_qos,
+        )
+
         self.next_sub = self.create_subscription(
             String,
             self.next_topic,
@@ -329,6 +376,7 @@ class MultiPointPatrol(Node):
         )
 
         self.publish_state()
+        self.publish_located_point(None, "节点启动", force=True)
 
         self.get_logger().info("=" * 60)
         self.get_logger().info("独立多点巡检节点已启动（对接由 docking_controller 执行）")
@@ -350,13 +398,16 @@ class MultiPointPatrol(Node):
         self.get_logger().info(
             f"外部干预检测: {self.external_goal_topic}"
         )
+        self.get_logger().info(
+            f"当前点位同步: {self.current_point_topic}"
+        )
         self.get_logger().info("=" * 60)
 
     # ================================================================
     # ★ 外部 goal_pose 检测
     # ================================================================
     def on_external_goal(self, msg: PoseStamped):
-        """检测到外部发 /goal_pose，清除内部停靠状态。
+        """检测到外部发 /goal_pose。
 
         场景：
           - Foxglove / RViz 手动发目标点
@@ -381,15 +432,13 @@ class MultiPointPatrol(Node):
             )
             return
 
-        # 静止状态下（IDLE/DOCKED/SETTLING/FAILED），清除停靠状态
-        if self.current_point_id is not None:
-            self.get_logger().warn(
-                f"检测到外部 /goal_pose，清除 "
-                f"current_point_id={self.current_point_id}"
-            )
-            self.current_point_id = None
+        # 发布目标不等于机器人已离开；后续由实际坐标更新点位。
+        self.get_logger().info(
+            "检测到外部 /goal_pose，"
+            "后续根据 map 中的实际位置更新当前点位"
+        )
 
-        # 状态切回 IDLE，让下次 on_next 从头开始
+        # 状态切回 IDLE，避免继续执行对接流程。
         if self.state in (
             PatrolState.DOCKED,
             PatrolState.SETTLING,
@@ -486,7 +535,13 @@ class MultiPointPatrol(Node):
             self.start_initial_backup()
             return
 
-        self.start_navigation(point_id)
+        # ★ 修改：非首次但无停靠点（current_point_id 被清空，比如 Foxglove 干预）
+        #   也先短后退再导航，避免机器人贴墙规划失败
+        self.get_logger().info(
+            f"下一点处理成功；下一点位={point_id}；"
+            "先短后退再导航"
+        )
+        self.start_relative_motion(PatrolState.UNDOCKING)
 
     # ================================================================
     # ★ 对接完成回调
@@ -794,9 +849,11 @@ class MultiPointPatrol(Node):
         self.motion_started_at = self.get_clock().now()
 
         if new_state == PatrolState.UNDOCKING:
-            detail = (
-                f"退出 {self.current_point_id} 号点"
-            )
+            # ★ 修改：current_point_id 可能为空（外部干预已清除）
+            if self.current_point_id is not None:
+                detail = f"退出 {self.current_point_id} 号点"
+            else:
+                detail = "短后退（之前的停靠点已丢失）"
         else:
             detail = new_state.value
 
@@ -806,8 +863,8 @@ class MultiPointPatrol(Node):
     # 主循环
     # ================================================================
     def on_timer(self):
-        # ★ DOCKED 状态下定期核验位置
-        self._verify_docked_position()
+        # 定期用 map -> base_footprint 的实际坐标同步点位。
+        self._sync_current_point_from_pose()
 
         if self.state == PatrolState.INITIAL_BACKUP:
             self.do_initial_backup()
@@ -887,18 +944,10 @@ class MultiPointPatrol(Node):
         self.publish_velocity(-self.undock_speed)
 
     # ================================================================
-    # ★ DOCKED 位置核验
+    # 当前位置与停靠状态同步
     # ================================================================
-    def _verify_docked_position(self):
-        """DOCKED 状态下定期检查机器人是否还在停靠点附近。
-
-        如果偏离超过容差（比如被 Foxglove 手动移动），清除停靠状态。
-        """
-        if self.state != PatrolState.DOCKED:
-            return
-        if self.current_point_id is None:
-            return
-
+    def _sync_current_point_from_pose(self):
+        """仅根据 map 中的二维位置识别最近点位，不检查航向角。"""
         now = self.get_clock().now()
         if self.last_docked_verify_at is not None:
             elapsed = (
@@ -913,24 +962,41 @@ class MultiPointPatrol(Node):
         if current_xy is None:
             return
 
-        recorded = self.points.get(self.current_point_id)
-        if recorded is None:
-            return
+        nearest_point_id = None
+        nearest_distance = float("inf")
+        for point_id, point in self.points.items():
+            distance = math.hypot(
+                current_xy[0] - point["x"],
+                current_xy[1] - point["y"],
+            )
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_point_id = point_id
 
-        distance = math.hypot(
-            current_xy[0] - recorded["x"],
-            current_xy[1] - recorded["y"],
+        detected_point_id = (
+            nearest_point_id
+            if nearest_distance <= self.docked_position_tolerance
+            else None
+        )
+        self.publish_located_point(
+            detected_point_id,
+            f"位置识别距离={nearest_distance:.3f} m",
         )
 
-        if distance > self.docked_position_tolerance:
-            self.get_logger().warn(
-                f"机器人已离开 {self.current_point_id} 号点 "
-                f"({distance:.3f} m > {self.docked_position_tolerance:.3f} m)，"
-                f"清除停靠状态"
-            )
+        # current_point_id 表示“已完成对接”。一旦实际位置离开该点，
+        # 只清除对接记录；不会因为手动开到其他点附近就假定已对接。
+        if (
+            self.current_point_id is not None
+            and detected_point_id != self.current_point_id
+        ):
+            old_point_id = self.current_point_id
             self.current_point_id = None
-            self.last_docked_verify_at = None
-            self.set_state(PatrolState.IDLE, "位置偏离停靠点")
+            self.get_logger().warn(
+                f"机器人已离开 {old_point_id} 号对接点，"
+                "清除已对接记录"
+            )
+            if self.state == PatrolState.DOCKED:
+                self.set_state(PatrolState.IDLE, "位置偏离停靠点")
 
     # ================================================================
     # 完成
@@ -940,6 +1006,11 @@ class MultiPointPatrol(Node):
 
         point_id = self.target_point_id
         self.current_point_id = point_id
+        self.publish_located_point(
+            point_id,
+            "导航和对接完成",
+            force=True,
+        )
 
         self.motion_origin = None
         self.motion_started_at = None
@@ -962,10 +1033,16 @@ class MultiPointPatrol(Node):
         self.motion_origin = None
         self.motion_started_at = None
 
-        self.get_logger().info(
-            f"已退出 {old_point_id} 号点，"
-            f"准备前往 {self.target_point_id} 号点"
-        )
+        # ★ 修改：current_point_id 可能为空（外部干预场景）
+        if old_point_id is not None:
+            self.get_logger().info(
+                f"已退出 {old_point_id} 号点，"
+                f"准备前往 {self.target_point_id} 号点"
+            )
+        else:
+            self.get_logger().info(
+                f"短后退完成，准备前往 {self.target_point_id} 号点"
+            )
 
         next_point_id = self.target_point_id
         self.start_navigation(next_point_id)
@@ -994,6 +1071,28 @@ class MultiPointPatrol(Node):
 
         self.get_logger().info(
             f"发布到达消息: {point_id}"
+        )
+
+    def publish_located_point(
+        self,
+        point_id,
+        reason: str = "",
+        force: bool = False,
+    ):
+        """发布根据二维坐标识别的所在点；空字符串表示无匹配点。"""
+        if not force and point_id == self.located_point_id:
+            return
+
+        old_point_id = self.located_point_id
+        self.located_point_id = point_id
+
+        msg = String()
+        msg.data = point_id or ""
+        self.current_point_pub.publish(msg)
+
+        self.get_logger().info(
+            f"所在点位更新: {old_point_id or 'None'} -> "
+            f"{point_id or 'None'}；原因={reason}"
         )
 
     def set_state(
